@@ -67,7 +67,7 @@ def main():
     tokenizer = build_tokenizer(args.model.tokenizer_path)
     if tokenizer.mask_token is None:
         tokenizer.add_special_tokens({"mask_token": "<M>"})
-    print(f'tokenizer.mask_token_id: {tokenizer.mask_token_id}')
+    print(f"tokenizer.mask_token_id: {tokenizer.mask_token_id}")
     if args.data.data_type == "plaintext":
         transform = partial(
             process_pretrain_example,
@@ -131,7 +131,6 @@ def main():
     )
     model_config = model.config
     helper.print_device_mem_info("VRAM usage after building model")
-
 
     get_optimizer_pre_hook = getattr(model, "get_optimizer_pre_hook", None)
     model = build_parallelize_model(
