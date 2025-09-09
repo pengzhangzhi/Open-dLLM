@@ -34,9 +34,9 @@ bash run_eval.sh
 
 - `--model_args`: Model configuration string with comma-separated parameters:
   - `pretrained`: HuggingFace model path
-  - `max_new_tokens`: Maximum tokens to generate 
-  - `steps`: Diffusion steps 
-  - `temperature`: Sampling temperature 
+  - `max_new_tokens`: Maximum tokens to generate
+  - `steps`: Diffusion steps
+  - `temperature`: Sampling temperature
   - `alg`: Sampling algorithm: `p2`, `origin`, `maskgit_plus`, `topk_margin`, `entropy`
 - `--tasks`: Available tasks: `humaneval`, `humaneval_plus`, `mbpp`, `mbpp_plus`
 - `--num_fewshot`: Number of few-shot examples (typically 0 for code generation)
@@ -52,7 +52,7 @@ The system uses LM-Eval-Harness built-in evaluation for code generation tasks:
 - **Metrics**: `pass@k` scores
 - **Process**: Executes generated code against test cases
 
-#### MBPP (`mbpp`, `mbpp_plus`) 
+#### MBPP (`mbpp`, `mbpp_plus`)
 - **Method**: Functional correctness testing
 - **Metrics**: `pass@k` scores
 - **Process**: Executes generated code against test cases
@@ -68,4 +68,3 @@ Results are saved to `evals_results/{task}-ns{shots}/`:
 # Enable WandB logging (optional)
 python eval.py [other_args] --wandb_project_name "your-project-name"
 ```
-

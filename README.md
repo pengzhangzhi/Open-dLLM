@@ -6,7 +6,7 @@
 👉 TL;DR: **Open-dLLM** is the most open release of a diffusion-based large language model to date —  
 including **pretraining, evaluation, inference, and checkpoints**.  
 
-This repo introduces **Open-dCoder**, the **code-generation variant** of Open-dLLM. 
+This repo introduces **Open-dCoder**, the **code-generation variant** of Open-dLLM.
 
 
 <p align="center">
@@ -31,7 +31,7 @@ This repo introduces **Open-dCoder**, the **code-generation variant** of Open-dL
 ## 🎥 Demo
 
 <p align="center">
-  <img src="https://github.com/pengzhangzhi/dLLM-training/blob/main/assets/quick-sort-demo.gif" 
+  <img src="https://github.com/pengzhangzhi/dLLM-training/blob/main/assets/quick-sort-demo.gif"
        alt="Quick Sort Demo" width="600"/>
 </p>
 
@@ -283,6 +283,6 @@ If you use **Open-dLLM** or **Open-dCoder** in your research, please cite us:
   author       = {Fred Zhangzhi Peng, Shuibai Zhang, Alex Tong, and contributors},
   year         = {2025},
   howpublished = {\url{https://github.com/pengzhangzhi/Open-dLLM}},
-  note         = {Blog: \url{https://oval-shell-31c.notion.site/Open-Diffusion-Large-Language-Model-25e03bf6136480b7a4ebe3d53be9f68a?pvs=74}, 
+  note         = {Blog: \url{https://oval-shell-31c.notion.site/Open-Diffusion-Large-Language-Model-25e03bf6136480b7a4ebe3d53be9f68a?pvs=74},
                   Model: \url{https://huggingface.co/fredzzp/open-dcoder-0.5B}}
 }

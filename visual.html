@@ -49,7 +49,7 @@
             color: #6272a4;
             margin-top: 0;
         }
-        
+
         /* Input Area */
         .input-area textarea {
             width: 100%;
@@ -64,7 +64,7 @@
             resize: vertical;
             box-sizing: border-box;
         }
-        
+
         .input-area textarea::placeholder {
             color: #6272a4;
         }
@@ -90,7 +90,7 @@
             transition: background-color 0.3s ease, transform 0.2s ease;
             box-shadow: 0 4px 6px rgba(0,0,0,0.2);
         }
-        
+
         /* Added style for record button */
         .btn.record-btn {
             background-color: #ff5f56;
@@ -113,13 +113,13 @@
         .btn.record-btn:hover {
             background-color: #e04a41;
         }
-        
+
         .btn:disabled {
             background-color: #3a3c4a;
             cursor: not-allowed;
             opacity: 0.6;
         }
-        
+
         .slider-container {
             display: flex;
             flex-direction: column;
@@ -218,7 +218,7 @@
             overflow-x: auto;
             position: relative; /* Needed for positioning the panes */
         }
-        
+
         .code-pane {
             position: absolute;
             top: 20px; /* Match parent padding */
@@ -235,7 +235,7 @@
         }
 
         .hljs { background: transparent !important; color: #f8f8f2 !important; }
-        
+
     </style>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/dracula.min.css">
 </head>
@@ -250,7 +250,7 @@
         <div class="input-area">
             <textarea id="text-input" placeholder="Paste your full generation output here, including the PROMPT, FINAL GENERATION, and GENERATION HISTORY sections..."></textarea>
         </div>
-        
+
         <div class="controls">
             <button class="btn" id="visualize-btn">Visualize</button>
             <button class="btn record-btn" id="record-btn">Record & Export MP4</button>
@@ -325,7 +325,7 @@
 
         function parseContent(content) {
             generationSteps = [];
-            
+
             const promptMatch = content.match(/={25} PROMPT ={25}\n\n([\s\S]*?)\n\n={25}/);
             promptText = promptMatch ? promptMatch[1].trim() : "Prompt not found.";
 
@@ -337,7 +337,7 @@
                 throw new Error("Generation history section not found.");
             }
             const historySection = historySectionMatch[1];
-            
+
             const stepsRaw = historySection.trim().split(/--- Step \d+ ---\n/);
             generationSteps = stepsRaw.slice(1).map(step => step.trim().replace(/\n\n$/, ''));
 
@@ -352,7 +352,7 @@
             if (animationTimeout) {
                 clearTimeout(animationTimeout);
             }
-            
+
             visualizeBtn.disabled = true;
             recordBtn.disabled = true;
 
@@ -377,7 +377,7 @@
             }
 
             let stepIndex = 0;
-            
+
             function animateNextStep() {
                 if (stepIndex >= generationSteps.length) {
                     visualizeBtn.disabled = false;
@@ -390,7 +390,7 @@
 
                 const currentActivePane = (activePane === 'a') ? codePaneA : codePaneB;
                 const currentInactivePane = (activePane === 'a') ? codePaneB : codePaneA;
-                
+
                 currentInactivePane.textContent = generationSteps[stepIndex];
                 hljs.highlightElement(currentInactivePane);
 
@@ -408,7 +408,7 @@
 
         function stopAndDownloadRecording() {
             if (!recorder) return;
-            
+
             recorder.stopRecording(function() {
                 const blob = recorder.getBlob();
                 invokeSaveAsDialog(blob, 'Code-Generation-Animation.mp4');
@@ -423,7 +423,7 @@
         function downloadFiles() {
             const htmlContent = document.documentElement.outerHTML;
             downloadAsFile("visualizer.html", htmlContent, "text/html");
-            
+
             const readmeContent = `# Code Generation Visualizer\n\nTo use, open \`visualizer.html\` and paste your model output.`;
             downloadAsFile("README.md", readmeContent, "text/markdown");
 
@@ -443,4 +443,3 @@
     </script>
 </body>
 </html>
-

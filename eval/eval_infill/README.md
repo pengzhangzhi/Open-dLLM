@@ -57,7 +57,7 @@ The system automatically evaluates generated code using task-specific metrics:
 #### HumanEval Infilling (`humaneval_infill`)
 - **Method**: Functional correctness testing
 - **Tool**: `evaluate_infilling_functional_correctness`
-- **Metrics**: `pass@k` 
+- **Metrics**: `pass@k`
 
 #### SantaCoder FIM (`santacoder-fim`)
 - **Method**: Exact string matching
