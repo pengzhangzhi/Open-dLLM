@@ -219,7 +219,7 @@ def eval_infill(
         prefixs = [d["prompt"] + "\n" for d in fim_data]
         suffixs = [d["suffix"] for d in fim_data]
         ground_truth_middles = [d["canonical_solution"] for d in fim_data]
-        task_ids = [i for i in range(len(fim_data))]
+        task_ids = list(range(len(fim_data)))
 
         if rank == 0:
             print(f"Loaded {len(fim_data)} examples from santacoder-fim")
