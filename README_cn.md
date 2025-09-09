@@ -1,6 +1,5 @@
 # 🔥 Open-dLLM: 开源扩散式大语言模型
 
-
 🌍 Languages: [English](README.md) | [中文](README_cn.md)
 
 👉 TL;DR: **Open-dLLM** 是迄今为止最开放的扩散式大语言模型发布 —— 我们开源了 **预训练、评测、推理以及模型权重**。
@@ -50,11 +49,11 @@
 
 ## ✨ 亮点
 
-* 🏋️ **完整预训练流程 + 开源数据集**
-* ⚡ **推理脚本** —— 简单运行采样和生成
-* 📊 **评测套件** —— HumanEval、MBPP、代码（支持 lm-eval-harness + 自定义指标）
-* 📦 **模型权重**（已上传到 Hugging Face）
-* 🤝 **透明配置**，可完全复现
+- 🏋️ **完整预训练流程 + 开源数据集**
+- ⚡ **推理脚本** —— 简单运行采样和生成
+- 📊 **评测套件** —— HumanEval、MBPP、代码（支持 lm-eval-harness + 自定义指标）
+- 📦 **模型权重**（已上传到 Hugging Face）
+- 🤝 **透明配置**，可完全复现
 
 ---
 
@@ -69,14 +68,14 @@
 
 ## 🔎 扩散式 LLM 开放程度对比
 
-| 项目                                                                                 |  数据 | 训练代码 |  推理 |   评测  |     权重    |
-| ---------------------------------------------------------------------------------- | :-: | :--: | :-: | :---: | :-------: |
-| **Open-dLLM / Open-dCoder (ours)**                                                 |  ✅  |   ✅  |  ✅  |   ✅   |     ✅     |
-| [LLaDA](https://github.com/ML-GSAI/LLaDA)                                          |  ❌  |   ❌  |  ✅  | ⚠️ 部分 |     ✅     |
-| [Dream](https://github.com/HKUNLP/Dream)                                           |  ❌  |   ❌  |  ✅  | ⚠️ 部分 |     ✅     |
-| [Gemini-Diffusion](https://deepmind.google/models/gemini-diffusion/)               |  ❌  |   ❌  |  ❌  |   ❌   | ❌ (仅 API) |
-| [Seed Diffusion](https://seed.bytedance.com/seed_diffusion)                        |  ❌  |   ❌  |  ❌  |   ❌   | ❌ (仅 API) |
-| [Mercury](https://www.inceptionlabs.ai/introducing-mercury-our-general-chat-model) |  ❌  |   ❌  |  ❌  |   ❌   | ❌ (仅 API) |
+| 项目                                                                               | 数据 | 训练代码 | 推理 |  评测   |    权重     |
+| ---------------------------------------------------------------------------------- | :--: | :------: | :--: | :-----: | :---------: |
+| **Open-dLLM / Open-dCoder (ours)**                                                 |  ✅  |    ✅    |  ✅  |   ✅    |     ✅      |
+| [LLaDA](https://github.com/ML-GSAI/LLaDA)                                          |  ❌  |    ❌    |  ✅  | ⚠️ 部分 |     ✅      |
+| [Dream](https://github.com/HKUNLP/Dream)                                           |  ❌  |    ❌    |  ✅  | ⚠️ 部分 |     ✅      |
+| [Gemini-Diffusion](https://deepmind.google/models/gemini-diffusion/)               |  ❌  |    ❌    |  ❌  |   ❌    | ❌ (仅 API) |
+| [Seed Diffusion](https://seed.bytedance.com/seed_diffusion)                        |  ❌  |    ❌    |  ❌  |   ❌    | ❌ (仅 API) |
+| [Mercury](https://www.inceptionlabs.ai/introducing-mercury-our-general-chat-model) |  ❌  |    ❌    |  ❌  |   ❌    | ❌ (仅 API) |
 
 ✅ = 完全开源 · ❌ = 未提供 · ⚠️ = 部分/有限
 
@@ -150,10 +149,10 @@ python sample.py
 
 我们开源了完整的 **评测套件**，覆盖 **标准代码生成任务** 和 **代码填充任务**：
 
-* HumanEval / HumanEval+
-* MBPP / MBPP+
-* HumanEval-Infill
-* SantaCoder-FIM
+- HumanEval / HumanEval+
+- MBPP / MBPP+
+- HumanEval-Infill
+- SantaCoder-FIM
 
 结果表格与 README 中一致，这里不再重复。
 
@@ -161,9 +160,9 @@ python sample.py
 
 ## 🏋️ 预训练
 
-* **数据**: 开源高质量代码语料 [**FineCode**](https://huggingface.co/datasets/fredzzp/fine_code)
-* **初始化**: 基于 **Qwen2.5-Coder** 继续预训练，从自回归 → 扩散
-* **目标函数**: Masked Diffusion Model (MDM)，mask 比例均匀采样 `[0,1]`
+- **数据**: 开源高质量代码语料 [**FineCode**](https://huggingface.co/datasets/fredzzp/fine_code)
+- **初始化**: 基于 **Qwen2.5-Coder** 继续预训练，从自回归 → 扩散
+- **目标函数**: Masked Diffusion Model (MDM)，mask 比例均匀采样 `[0,1]`
 
 ---
 
@@ -171,10 +170,10 @@ python sample.py
 
 本项目建立在以下工作之上：
 
-* **框架与工具**: [VeOmni](https://github.com/ByteDance-Seed/VeOmni), [lm-eval-harness](https://github.com/EleutherAI/lm-evaluation-harness)
-* **开源 dLLM**: [LLaDA](https://github.com/ML-GSAI/LLaDA), [Dream](https://github.com/HKUNLP/Dream)
-* **先锋探索**: [Gemini-Diffusion](https://deepmind.google/models/gemini-diffusion/), [Seed Diffusion](https://seed.bytedance.com/seed_diffusion), [Mercury](https://www.inceptionlabs.ai/introducing-mercury-our-general-chat-model)
-* **基础研究**: [MD4](https://proceedings.neurips.cc/paper_files/paper/2024/hash/bad233b9849f019aead5e5cc60cef70f-Abstract-Conference.html), [MDLM](https://arxiv.org/abs/2406.07524), [DPLM](https://github.com/bytedance/dplm)
+- **框架与工具**: [VeOmni](https://github.com/ByteDance-Seed/VeOmni), [lm-eval-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+- **开源 dLLM**: [LLaDA](https://github.com/ML-GSAI/LLaDA), [Dream](https://github.com/HKUNLP/Dream)
+- **先锋探索**: [Gemini-Diffusion](https://deepmind.google/models/gemini-diffusion/), [Seed Diffusion](https://seed.bytedance.com/seed_diffusion), [Mercury](https://www.inceptionlabs.ai/introducing-mercury-our-general-chat-model)
+- **基础研究**: [MD4](https://proceedings.neurips.cc/paper_files/paper/2024/hash/bad233b9849f019aead5e5cc60cef70f-Abstract-Conference.html), [MDLM](https://arxiv.org/abs/2406.07524), [DPLM](https://github.com/bytedance/dplm)
 
 我们希望 **Open-dLLM** 能回馈社区，推动扩散式大语言模型研究。
 

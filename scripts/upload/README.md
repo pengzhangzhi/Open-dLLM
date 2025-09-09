@@ -1,12 +1,12 @@
 ---
 license: apache-2.0
 language:
-- code
+  - code
 library_name: transformers
 tags:
-- masked-diffusion
-- code-generation
-- qwen2
+  - masked-diffusion
+  - code-generation
+  - qwen2
 ---
 
 ## Open Diffusion Large Language Models for Code Generation
@@ -23,8 +23,8 @@ First, make sure you have the latest `transformers` library installed.
 pip install transformers torch huggingface_hub
 ```
 
-
 You can then use the model for generation. Note: You must pass trust_remote_code=True to load the custom model architecture.
+
 ```python
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM

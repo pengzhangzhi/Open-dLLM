@@ -1,13 +1,11 @@
-
 # 🔥 Open-dLLM: Open Diffusion Large Language Models
 
 🌍 Languages: [English](README.md) | [中文](README_cn.md)
 
 👉 TL;DR: **Open-dLLM** is the most open release of a diffusion-based large language model to date —  
-including **pretraining, evaluation, inference, and checkpoints**.  
+including **pretraining, evaluation, inference, and checkpoints**.
 
 This repo introduces **Open-dCoder**, the **code-generation variant** of Open-dLLM.
-
 
 <p align="center">
   <a href="https://github.com/pengzhangzhi/Open-dLLM">
@@ -26,7 +24,6 @@ This repo introduces **Open-dCoder**, the **code-generation variant** of Open-dL
 <p align="center">
   <b>💻 Code</b> &nbsp; | &nbsp; <b>📖 Blog</b> &nbsp; | &nbsp; <b>🤗 Model</b>
 </p>
-
 
 ## 🎥 Demo
 
@@ -51,11 +48,11 @@ This repo introduces **Open-dCoder**, the **code-generation variant** of Open-dL
 
 ## ✨ Highlights
 
-- 🏋️ **Pretraining pipeline + open datasets**  
-- ⚡ **Inference scripts** — easy sampling & generation  
-- 📊 **Evaluation suite** — HumanEval, MBPP, Infilling (lm-eval-harness + custom metrics)  
-- 📦 **Weights + checkpoints** on Hugging Face  
-- 🤝 **Transparent configs** for full reproducibility  
+- 🏋️ **Pretraining pipeline + open datasets**
+- ⚡ **Inference scripts** — easy sampling & generation
+- 📊 **Evaluation suite** — HumanEval, MBPP, Infilling (lm-eval-harness + custom metrics)
+- 📦 **Weights + checkpoints** on Hugging Face
+- 🤝 **Transparent configs** for full reproducibility
 
 ---
 
@@ -70,14 +67,14 @@ Most diffusion LLM repos (e.g., LLaDA, Dream) only release **inference scripts +
 
 ## 🔎 Transparency Comparison of Diffusion LLM Releases
 
-| Project                                                                 | Data | Training Code | Inference | Evaluation | Weights |
-|-------------------------------------------------------------------------|:---:|:-------------:|:---------:|:----------:|:-------:|
-| **Open-dLLM / Open-dCoder (ours)**                                      | ✅  | ✅            | ✅        | ✅         | ✅      |
-| [LLaDA](https://github.com/ML-GSAI/LLaDA)                               | ❌  | ❌            | ✅        | ⚠️ Limited | ✅      |
-| [Dream](https://github.com/HKUNLP/Dream)                                | ❌  | ❌            | ✅        | ⚠️ Limited | ✅      |
-| [Gemini-Diffusion](https://deepmind.google/models/gemini-diffusion/)    | ❌  | ❌            | ❌        | ❌         | ❌ (API only) |
-| [Seed Diffusion](https://seed.bytedance.com/seed_diffusion)             | ❌  | ❌            | ❌        | ❌         | ❌ (API only) |
-| [Mercury](https://www.inceptionlabs.ai/introducing-mercury-our-general-chat-model) | ❌  | ❌            | ❌        | ❌         | ❌ (API only) |
+| Project                                                                            | Data | Training Code | Inference | Evaluation |    Weights    |
+| ---------------------------------------------------------------------------------- | :--: | :-----------: | :-------: | :--------: | :-----------: |
+| **Open-dLLM / Open-dCoder (ours)**                                                 |  ✅  |      ✅       |    ✅     |     ✅     |      ✅       |
+| [LLaDA](https://github.com/ML-GSAI/LLaDA)                                          |  ❌  |      ❌       |    ✅     | ⚠️ Limited |      ✅       |
+| [Dream](https://github.com/HKUNLP/Dream)                                           |  ❌  |      ❌       |    ✅     | ⚠️ Limited |      ✅       |
+| [Gemini-Diffusion](https://deepmind.google/models/gemini-diffusion/)               |  ❌  |      ❌       |    ❌     |     ❌     | ❌ (API only) |
+| [Seed Diffusion](https://seed.bytedance.com/seed_diffusion)                        |  ❌  |      ❌       |    ❌     |     ❌     | ❌ (API only) |
+| [Mercury](https://www.inceptionlabs.ai/introducing-mercury-our-general-chat-model) |  ❌  |      ❌       |    ❌     |     ❌     | ❌ (API only) |
 
 ✅ = fully available · ❌ = not provided · ⚠️ = partial/limited
 
@@ -105,7 +102,7 @@ pip install --upgrade --no-cache-dir \
   pytest yapf py-spy pyext pre-commit ruff packaging
 
 pip install -e .
-````
+```
 
 ---
 
@@ -160,28 +157,28 @@ Benchmarks include: **HumanEval / HumanEval+**, **MBPP / MBPP+**, **HumanEval-In
 | Method                       | HumanEval |          | HumanEval+ |          | MBPP     |          | MBPP+    |          |
 | ---------------------------- | --------- | -------- | ---------- | -------- | -------- | -------- | -------- | -------- |
 |                              | Pass\@1   | Pass\@10 | Pass\@1    | Pass\@10 | Pass\@1  | Pass\@10 | Pass\@1  | Pass\@10 |
-| LLaDA (8B)                   | 35.4      | 50.0     | 30.5       | 43.3     | 38.8     | 53.4        | 52.6     | 69.1        |
-| Dream (7B)                   | 56.7      | 59.2     | 50.0       | 53.7     | 55.4     | 56.2        | 71.5     | 72.5        |
+| LLaDA (8B)                   | 35.4      | 50.0     | 30.5       | 43.3     | 38.8     | 53.4     | 52.6     | 69.1     |
+| Dream (7B)                   | 56.7      | 59.2     | 50.0       | 53.7     | 55.4     | 56.2     | 71.5     | 72.5     |
 | Mask DFM (1.3B)              | 9.1       | 17.6     | 7.9        | 13.4     | 6.2      | 25.0     | –        | –        |
 | Edit Flow (1.3B)             | 12.8      | 24.3     | 10.4       | 20.7     | 10.0     | 36.4     | –        | –        |
 | **Open-dCoder (0.5B, Ours)** | **20.8**  | **38.4** | **17.6**   | **35.2** | **16.7** | **38.4** | **23.9** | **53.6** |
 
-> *Despite being only 0.5B parameters, Open-dCoder competes with much larger dLLMs in code completion tasks.*
+> _Despite being only 0.5B parameters, Open-dCoder competes with much larger dLLMs in code completion tasks._
 
 ---
 
 #### Code Infilling
 
-| Method                                | HumanEval Infill Pass@1 | SantaCoder Exact Match |
-| ------------------------------------- | ----------------------: | ---------------------: |
-| LLaDA-8B                              |                    48.3 |                  35.1  |
-| Dream-7B                              |                    39.4 |                  40.7  |
-| DiffuCoder-7B                         |                    54.8 |                  38.8  |
-| Dream-Coder-7B                        |                    55.3 |                  40.0  |
-| **Open-dCoder (0.5B, Ours)**          |                    32.5 |                  29.6  |
-| **Open-dCoder (0.5B, Ours)** Oracle Length |               77.4 |                  56.4  |
+| Method                                     | HumanEval Infill Pass@1 | SantaCoder Exact Match |
+| ------------------------------------------ | ----------------------: | ---------------------: |
+| LLaDA-8B                                   |                    48.3 |                   35.1 |
+| Dream-7B                                   |                    39.4 |                   40.7 |
+| DiffuCoder-7B                              |                    54.8 |                   38.8 |
+| Dream-Coder-7B                             |                    55.3 |                   40.0 |
+| **Open-dCoder (0.5B, Ours)**               |                    32.5 |                   29.6 |
+| **Open-dCoder (0.5B, Ours)** Oracle Length |                    77.4 |                   56.4 |
 
-> *We followed the average fixed length evaluation setting in [DreamOn](https://hkunlp.github.io/blog/2025/dreamon/) to get the results.*
+> _We followed the average fixed length evaluation setting in [DreamOn](https://hkunlp.github.io/blog/2025/dreamon/) to get the results._
 
 ---
 
@@ -211,9 +208,9 @@ bash run_eval.sh
 
 ## 🏋️ Pretraining
 
-* **Data**: Concise, high-quality code corpus [**FineCode**](https://huggingface.co/datasets/fredzzp/fine_code), hosted on Hugging Face.
-* **Initialization**: Following *Dream*, continued pretraining from **Qwen2.5-Coder**, adapting it into the diffusion framework.
-* **Loss**: Masked Diffusion Model (MDM) objective — masking ratios uniformly sampled from `[0,1]`, reconstructed with cross-entropy loss.
+- **Data**: Concise, high-quality code corpus [**FineCode**](https://huggingface.co/datasets/fredzzp/fine_code), hosted on Hugging Face.
+- **Initialization**: Following _Dream_, continued pretraining from **Qwen2.5-Coder**, adapting it into the diffusion framework.
+- **Loss**: Masked Diffusion Model (MDM) objective — masking ratios uniformly sampled from `[0,1]`, reconstructed with cross-entropy loss.
 
 ### Download Data
 
@@ -263,15 +260,12 @@ api.upload_folder(repo_id=REPO_ID, repo_type="model", folder_path=LOCAL_DIR)
 
 This project builds on incredible prior work:
 
-* **Frameworks & Tooling**: [VeOmni](https://github.com/ByteDance-Seed/VeOmni), [lm-eval-harness](https://github.com/EleutherAI/lm-evaluation-harness)
-* **Open-source dLLMs**: [LLaDA](https://github.com/ML-GSAI/LLaDA), [Dream](https://github.com/HKUNLP/Dream)
-* **Pioneering dLLMs**: [Gemini-Diffusion](https://deepmind.google/models/gemini-diffusion/), [Seed Diffusion](https://seed.bytedance.com/seed_diffusion), [Mercury](https://www.inceptionlabs.ai/introducing-mercury-our-general-chat-model)
-* **Foundational research**: [MD4](https://proceedings.neurips.cc/paper_files/paper/2024/hash/bad233b9849f019aead5e5cc60cef70f-Abstract-Conference.html), [MDLM](https://arxiv.org/abs/2406.07524), [DPLM](https://github.com/bytedance/dplm)
+- **Frameworks & Tooling**: [VeOmni](https://github.com/ByteDance-Seed/VeOmni), [lm-eval-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+- **Open-source dLLMs**: [LLaDA](https://github.com/ML-GSAI/LLaDA), [Dream](https://github.com/HKUNLP/Dream)
+- **Pioneering dLLMs**: [Gemini-Diffusion](https://deepmind.google/models/gemini-diffusion/), [Seed Diffusion](https://seed.bytedance.com/seed_diffusion), [Mercury](https://www.inceptionlabs.ai/introducing-mercury-our-general-chat-model)
+- **Foundational research**: [MD4](https://proceedings.neurips.cc/paper_files/paper/2024/hash/bad233b9849f019aead5e5cc60cef70f-Abstract-Conference.html), [MDLM](https://arxiv.org/abs/2406.07524), [DPLM](https://github.com/bytedance/dplm)
 
 We stand on the shoulders of these projects, and hope Open-dLLM contributes back to the diffusion LLM community.
-
-
-
 
 ## 📚 Citation
 
@@ -286,3 +280,4 @@ If you use **Open-dLLM** or **Open-dCoder** in your research, please cite us:
   note         = {Blog: \url{https://oval-shell-31c.notion.site/Open-Diffusion-Large-Language-Model-25e03bf6136480b7a4ebe3d53be9f68a?pvs=74},
                   Model: \url{https://huggingface.co/fredzzp/open-dcoder-0.5B}}
 }
+```

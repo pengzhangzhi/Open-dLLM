@@ -1,30 +1,54 @@
 repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
-    -   id: check-ast
-    -   id: check-added-large-files
-        args: ['--maxkb=25000']
-    -   id: check-merge-conflict
-    -   id: check-yaml
-    -   id: debug-statements
-    -   id: end-of-file-fixer
-    -   id: requirements-txt-fixer
-    -   id: trailing-whitespace
+      - id: check-ast
+      - id: check-added-large-files
+        args: ["--maxkb=25000"]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: debug-statements
+      - id: end-of-file-fixer
+      - id: requirements-txt-fixer
+      - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
-    -   id: no-commit-to-branch
-        args: ['--branch', 'master']
+      - id: no-commit-to-branch
+        args: ["--branch", "master"]
 
--   repo: https://github.com/asottile/pyupgrade
+  - repo: https://github.com/asottile/pyupgrade
     rev: v3.17.0
     hooks:
-    -   id: pyupgrade
+      - id: pyupgrade
         args: [--py38-plus]
 
--   repo: https://github.com/astral-sh/ruff-pre-commit
+  - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.5.5
     hooks:
-    -   id: ruff
+      - id: ruff
         args: [--fix]
-    -   id: ruff-format
-exclude: 'lm-evaluation-harness|veomni|human-eval-infilling'
+      - id: ruff-format
+  # Current repo is not type safe enough to make mypy reasonable
+  #-   repo: https://github.com/pre-commit/mirrors-mypy
+  #    rev: v1.10.0
+  #    hooks:
+  #    -   id: mypy
+  #        additional_dependencies: [types-requests]
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.3.0
+    hooks:
+      - id: codespell
+        args:
+          - --ignore-words-list=te,parms # Comma-separated list of words to ignore
+          - --quiet-level=2
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        # To avoid conflicts, tell prettier to ignore file types
+        # that ruff already handles.
+        exclude_types: [python]
+exclude: "lm-evaluation-harness|veomni|human-eval-infilling|configs/model_configs"

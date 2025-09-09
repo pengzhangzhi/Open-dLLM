@@ -55,3 +55,13 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+# pyproject.toml
+
+[tool.mypy]
+# Mypy will not check files in these directories
+exclude = [
+    'lm-evaluation-harness/',
+    'veomni/',
+    'human-eval-infilling/',
+]
