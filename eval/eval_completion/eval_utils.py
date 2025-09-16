@@ -1,8 +1,9 @@
-import os
-import json
 import glob
+import json
+import os
 import re
 import sys
+
 import wandb
 
 
@@ -45,6 +46,7 @@ def upload_results_after_eval(wandb_project_name=None):
     # Only run on main process (rank 0) to avoid duplicate uploads
     try:
         import torch.distributed as dist
+
         if dist.is_initialized() and dist.get_rank() != 0:
             return
     except ImportError:
@@ -52,7 +54,7 @@ def upload_results_after_eval(wandb_project_name=None):
         pass
 
     # Additional check using environment variables
-    rank = int(os.environ.get('RANK', 0))
+    rank = int(os.environ.get("RANK", 0))
     if rank != 0:
         return
 
@@ -73,21 +75,18 @@ def upload_results_after_eval(wandb_project_name=None):
         if results_files:
             # Get the latest files based on timestamp in filename
             latest_results = get_latest_file(results_files)
-            latest_samples = (
-                get_latest_file(samples_files) if samples_files else None
-            )
+            latest_samples = get_latest_file(samples_files) if samples_files else None
 
             # Extract timestamps and validate consistency
             results_timestamp = extract_timestamp_from_filename(latest_results)
             samples_timestamp = extract_timestamp_from_filename(latest_samples)
 
             assert results_timestamp == samples_timestamp, (
-                f"Timestamp mismatch: results={results_timestamp}, "
-                f"samples={samples_timestamp}"
+                f"Timestamp mismatch: results={results_timestamp}, " f"samples={samples_timestamp}"
             )
 
             # Load results file to extract metrics and metadata
-            with open(latest_results, 'r') as f:
+            with open(latest_results) as f:
                 results_data = json.load(f)
 
             # Extract config from command line for wandb
@@ -106,18 +105,12 @@ def upload_results_after_eval(wandb_project_name=None):
 
             # Get wandb project name from parameter or config
             if wandb_project_name is None:
-                wandb_project_name = config.get(
-                    'wandb_project_name', 'dllm-eval'
-                )
-            config['wandb_project_name'] = wandb_project_name
+                wandb_project_name = config.get("wandb_project_name", "dllm-eval")
+            config["wandb_project_name"] = wandb_project_name
 
             # Initialize wandb
-            model_name = config.get('model', 'unknown').replace('/', '-')
-            wandb.init(
-                project=wandb_project_name,
-                config=config,
-                name=f"eval-{model_name}-{results_timestamp}"
-            )
+            model_name = config.get("model", "unknown").replace("/", "-")
+            wandb.init(project=wandb_project_name, config=config, name=f"eval-{model_name}-{results_timestamp}")
 
             # Log evaluation metrics with flattened structure
             metrics = flatten_metrics(results_data.get("results", {}))
@@ -152,10 +145,7 @@ def get_latest_file(file_list):
     # Sort files by timestamp extracted from filename
     def extract_timestamp(filepath):
         # Extract timestamp like "2025-08-21T20-45-09.520028"
-        match = re.search(
-            r'(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d+)',
-            filepath
-        )
+        match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d+)", filepath)
         return match.group(1) if match else ""
 
     return max(file_list, key=extract_timestamp)
@@ -163,7 +153,7 @@ def get_latest_file(file_list):
 
 def extract_timestamp_from_filename(filepath):
     """Extract timestamp from filename."""
-    pattern = r'(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d+)'
+    pattern = r"(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d+)"
     match = re.search(pattern, filepath)
     return match.group(1) if match else "unknown"
 

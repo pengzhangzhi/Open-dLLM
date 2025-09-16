@@ -51,4 +51,3 @@ accelerate launch --num_processes $NUM_PROCESSES eval.py \
     --output_path evals_results/mbpp_plus-ns0 \
     --log_samples \
     --confirm_run_unsafe_code
-

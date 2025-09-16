@@ -1,446 +1,491 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Code Generation Visualizer</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
     <style>
-        /* General Styling */
-        body {
-            background-color: #1a1b26;
-            color: #c0c5f0;
-            font-family: 'Fira Code', 'Roboto Mono', monospace;
-            display: flex;
-            justify-content: center;
-            align-items: flex-start;
-            min-height: 100vh;
-            margin: 0;
-            padding: 2rem;
-            box-sizing: border-box;
-        }
+      /* General Styling */
+      body {
+        background-color: #1a1b26;
+        color: #c0c5f0;
+        font-family: "Fira Code", "Roboto Mono", monospace;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        min-height: 100vh;
+        margin: 0;
+        padding: 2rem;
+        box-sizing: border-box;
+      }
 
-        /* Main Container */
-        .container {
-            width: 100%;
-            max-width: 900px;
-            display: flex;
-            flex-direction: column;
-            gap: 1.5rem;
-        }
+      /* Main Container */
+      .container {
+        width: 100%;
+        max-width: 900px;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
 
-        /* Header and Controls */
-        .header {
-            text-align: center;
-        }
+      /* Header and Controls */
+      .header {
+        text-align: center;
+      }
 
-        h1 {
-            font-size: 2.5rem;
-            margin-bottom: 0.5rem;
-            background: -webkit-linear-gradient(45deg, #ff79c6, #8be9fd);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
+      h1 {
+        font-size: 2.5rem;
+        margin-bottom: 0.5rem;
+        background: -webkit-linear-gradient(45deg, #ff79c6, #8be9fd);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
 
-        p {
-            font-size: 1rem;
-            color: #6272a4;
-            margin-top: 0;
-        }
-        
-        /* Input Area */
-        .input-area textarea {
-            width: 100%;
-            height: 200px;
-            background-color: #282a36;
-            color: #f8f8f2;
-            border: 1px solid #44475a;
-            border-radius: 8px;
-            padding: 15px;
-            font-family: inherit;
-            font-size: 0.9rem;
-            resize: vertical;
-            box-sizing: border-box;
-        }
-        
-        .input-area textarea::placeholder {
-            color: #6272a4;
-        }
+      p {
+        font-size: 1rem;
+        color: #6272a4;
+        margin-top: 0;
+      }
 
-        .controls {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 1.5rem;
-            margin-top: 1rem;
-            flex-wrap: wrap;
-        }
+      /* Input Area */
+      .input-area textarea {
+        width: 100%;
+        height: 200px;
+        background-color: #282a36;
+        color: #f8f8f2;
+        border: 1px solid #44475a;
+        border-radius: 8px;
+        padding: 15px;
+        font-family: inherit;
+        font-size: 0.9rem;
+        resize: vertical;
+        box-sizing: border-box;
+      }
 
-        .btn {
-            background-color: #44475a;
-            color: #f8f8f2;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-family: inherit;
-            font-size: 1rem;
-            transition: background-color 0.3s ease, transform 0.2s ease;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
-        }
-        
-        /* Added style for record button */
-        .btn.record-btn {
-            background-color: #ff5f56;
-        }
-        .btn.record-btn.recording {
-            background-color: #e04a41;
-            animation: pulse 1.5s infinite;
-        }
+      .input-area textarea::placeholder {
+        color: #6272a4;
+      }
 
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(255, 95, 86, 0.7); }
-            70% { box-shadow: 0 0 0 10px rgba(255, 95, 86, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(255, 95, 86, 0); }
-        }
+      .controls {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 1.5rem;
+        margin-top: 1rem;
+        flex-wrap: wrap;
+      }
 
+      .btn {
+        background-color: #44475a;
+        color: #f8f8f2;
+        border: none;
+        padding: 12px 24px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-family: inherit;
+        font-size: 1rem;
+        transition:
+          background-color 0.3s ease,
+          transform 0.2s ease;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+      }
 
-        .btn:hover {
-            background-color: #6272a4;
-        }
-        .btn.record-btn:hover {
-            background-color: #e04a41;
-        }
-        
-        .btn:disabled {
-            background-color: #3a3c4a;
-            cursor: not-allowed;
-            opacity: 0.6;
-        }
-        
-        .slider-container {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 0.5rem;
-            color: #6272a4;
-            font-size: 0.9rem;
-        }
+      /* Added style for record button */
+      .btn.record-btn {
+        background-color: #ff5f56;
+      }
+      .btn.record-btn.recording {
+        background-color: #e04a41;
+        animation: pulse 1.5s infinite;
+      }
 
-        input[type="range"] {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 150px;
-            height: 8px;
-            background: #44475a;
-            border-radius: 5px;
-            outline: none;
-            opacity: 0.8;
-            transition: opacity .2s;
+      @keyframes pulse {
+        0% {
+          box-shadow: 0 0 0 0 rgba(255, 95, 86, 0.7);
         }
+        70% {
+          box-shadow: 0 0 0 10px rgba(255, 95, 86, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(255, 95, 86, 0);
+        }
+      }
 
-        input[type="range"]:hover {
-            opacity: 1;
-        }
+      .btn:hover {
+        background-color: #6272a4;
+      }
+      .btn.record-btn:hover {
+        background-color: #e04a41;
+      }
 
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 20px;
-            height: 20px;
-            background: #8be9fd;
-            cursor: pointer;
-            border-radius: 50%;
-        }
+      .btn:disabled {
+        background-color: #3a3c4a;
+        cursor: not-allowed;
+        opacity: 0.6;
+      }
 
-        input[type="range"]::-moz-range-thumb {
-            width: 20px;
-            height: 20px;
-            background: #8be9fd;
-            cursor: pointer;
-            border-radius: 50%;
-        }
+      .slider-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.5rem;
+        color: #6272a4;
+        font-size: 0.9rem;
+      }
 
+      input[type="range"] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 150px;
+        height: 8px;
+        background: #44475a;
+        border-radius: 5px;
+        outline: none;
+        opacity: 0.8;
+        transition: opacity 0.2s;
+      }
 
-        /* Prompt Display */
-        .prompt-display {
-            background-color: #282a36;
-            border-radius: 8px;
-            padding: 20px;
-            border: 1px solid #44475a;
-            display: none; /* Hidden by default */
-        }
-        .prompt-display h3 {
-            margin: 0 0 10px 0;
-            color: #8be9fd;
-            font-size: 1.1rem;
-        }
-        .prompt-display p {
-            color: #f8f8f2;
-            margin: 0;
-            white-space: pre-wrap;
-        }
+      input[type="range"]:hover {
+        opacity: 1;
+      }
 
-        /* Editor Window Styling */
-        .editor-window {
-            background-color: #282a36;
-            border-radius: 8px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            border: 1px solid #44475a;
-            overflow: hidden;
-        }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 20px;
+        height: 20px;
+        background: #8be9fd;
+        cursor: pointer;
+        border-radius: 50%;
+      }
 
-        .title-bar {
-            background-color: #21222c;
-            padding: 12px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
+      input[type="range"]::-moz-range-thumb {
+        width: 20px;
+        height: 20px;
+        background: #8be9fd;
+        cursor: pointer;
+        border-radius: 50%;
+      }
 
-        .title-bar::before {
-            content: ' ';
-            display: block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background-color: #ff5f56;
-            box-shadow: 20px 0 0 #ffbd2e, 40px 0 0 #27c93f;
-        }
+      /* Prompt Display */
+      .prompt-display {
+        background-color: #282a36;
+        border-radius: 8px;
+        padding: 20px;
+        border: 1px solid #44475a;
+        display: none; /* Hidden by default */
+      }
+      .prompt-display h3 {
+        margin: 0 0 10px 0;
+        color: #8be9fd;
+        font-size: 1.1rem;
+      }
+      .prompt-display p {
+        color: #f8f8f2;
+        margin: 0;
+        white-space: pre-wrap;
+      }
 
-        .code-body {
-            padding: 20px;
-            min-height: 450px;
-            font-size: 1rem;
-            line-height: 1.6;
-            overflow-x: auto;
-            position: relative; /* Needed for positioning the panes */
-        }
-        
-        .code-pane {
-            position: absolute;
-            top: 20px; /* Match parent padding */
-            left: 20px; /* Match parent padding */
-            right: 20px;
-            bottom: 20px;
-            margin: 0;
-            opacity: 0;
-            transition: opacity 0.4s ease-in-out; /* Slower, smoother transition */
-        }
+      /* Editor Window Styling */
+      .editor-window {
+        background-color: #282a36;
+        border-radius: 8px;
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        border: 1px solid #44475a;
+        overflow: hidden;
+      }
 
-        .code-pane.active {
-            opacity: 1;
-        }
+      .title-bar {
+        background-color: #21222c;
+        padding: 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
 
-        .hljs { background: transparent !important; color: #f8f8f2 !important; }
-        
+      .title-bar::before {
+        content: " ";
+        display: block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background-color: #ff5f56;
+        box-shadow:
+          20px 0 0 #ffbd2e,
+          40px 0 0 #27c93f;
+      }
+
+      .code-body {
+        padding: 20px;
+        min-height: 450px;
+        font-size: 1rem;
+        line-height: 1.6;
+        overflow-x: auto;
+        position: relative; /* Needed for positioning the panes */
+      }
+
+      .code-pane {
+        position: absolute;
+        top: 20px; /* Match parent padding */
+        left: 20px; /* Match parent padding */
+        right: 20px;
+        bottom: 20px;
+        margin: 0;
+        opacity: 0;
+        transition: opacity 0.4s ease-in-out; /* Slower, smoother transition */
+      }
+
+      .code-pane.active {
+        opacity: 1;
+      }
+
+      .hljs {
+        background: transparent !important;
+        color: #f8f8f2 !important;
+      }
     </style>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/dracula.min.css">
-</head>
-<body>
-
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/dracula.min.css"
+    />
+  </head>
+  <body>
     <div class="container" id="capture-area">
-        <div class="header">
-            <h1>Code Generation Visualizer</h1>
-            <p>Paste your model's output below to see the generation process come to life.</p>
-        </div>
+      <div class="header">
+        <h1>Code Generation Visualizer</h1>
+        <p>
+          Paste your model's output below to see the generation process come to
+          life.
+        </p>
+      </div>
 
-        <div class="input-area">
-            <textarea id="text-input" placeholder="Paste your full generation output here, including the PROMPT, FINAL GENERATION, and GENERATION HISTORY sections..."></textarea>
-        </div>
-        
-        <div class="controls">
-            <button class="btn" id="visualize-btn">Visualize</button>
-            <button class="btn record-btn" id="record-btn">Record & Export MP4</button>
-            <div class="slider-container">
-                <label for="speed-slider">Speed: <span id="speed-value">600</span>ms</label>
-                <input type="range" id="speed-slider" min="100" max="2000" value="600" step="50">
-            </div>
-            <button class="btn" id="download-btn">Download Files</button>
-        </div>
+      <div class="input-area">
+        <textarea
+          id="text-input"
+          placeholder="Paste your full generation output here, including the PROMPT, FINAL GENERATION, and GENERATION HISTORY sections..."
+        ></textarea>
+      </div>
 
-        <div class="prompt-display" id="prompt-container">
-            <h3>Prompt:</h3>
-            <p id="prompt-content"></p>
+      <div class="controls">
+        <button class="btn" id="visualize-btn">Visualize</button>
+        <button class="btn record-btn" id="record-btn">
+          Record & Export MP4
+        </button>
+        <div class="slider-container">
+          <label for="speed-slider"
+            >Speed: <span id="speed-value">600</span>ms</label
+          >
+          <input
+            type="range"
+            id="speed-slider"
+            min="100"
+            max="2000"
+            value="600"
+            step="50"
+          />
         </div>
+        <button class="btn" id="download-btn">Download Files</button>
+      </div>
 
-        <div class="editor-window">
-            <div class="title-bar"></div>
-            <div class="code-body">
-                <pre><code id="code-output-a" class="language-python code-pane"></code></pre>
-                <pre><code id="code-output-b" class="language-python code-pane"></code></pre>
-            </div>
+      <div class="prompt-display" id="prompt-container">
+        <h3>Prompt:</h3>
+        <p id="prompt-content"></p>
+      </div>
+
+      <div class="editor-window">
+        <div class="title-bar"></div>
+        <div class="code-body">
+          <pre><code id="code-output-a" class="language-python code-pane"></code></pre>
+          <pre><code id="code-output-b" class="language-python code-pane"></code></pre>
         </div>
+      </div>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://www.webrtc-experiment.com/screenshot.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/recordrtc@5.6.2/RecordRTC.min.js"></script>
     <script>
-        // DOM Elements
-        const textInput = document.getElementById('text-input');
-        const visualizeBtn = document.getElementById('visualize-btn');
-        const downloadBtn = document.getElementById('download-btn');
-        const recordBtn = document.getElementById('record-btn');
-        const promptContainer = document.getElementById('prompt-container');
-        const promptContentEl = document.getElementById('prompt-content');
-        const codePaneA = document.getElementById('code-output-a');
-        const codePaneB = document.getElementById('code-output-b');
-        const speedSlider = document.getElementById('speed-slider');
-        const speedValueEl = document.getElementById('speed-value');
-        const captureArea = document.getElementById('capture-area');
+      // DOM Elements
+      const textInput = document.getElementById("text-input");
+      const visualizeBtn = document.getElementById("visualize-btn");
+      const downloadBtn = document.getElementById("download-btn");
+      const recordBtn = document.getElementById("record-btn");
+      const promptContainer = document.getElementById("prompt-container");
+      const promptContentEl = document.getElementById("prompt-content");
+      const codePaneA = document.getElementById("code-output-a");
+      const codePaneB = document.getElementById("code-output-b");
+      const speedSlider = document.getElementById("speed-slider");
+      const speedValueEl = document.getElementById("speed-value");
+      const captureArea = document.getElementById("capture-area");
 
-        let generationSteps = [];
-        let finalCode = "";
-        let promptText = "";
-        let animationTimeout;
-        let activePane = 'a';
-        let recorder = null;
+      let generationSteps = [];
+      let finalCode = "";
+      let promptText = "";
+      let animationTimeout;
+      let activePane = "a";
+      let recorder = null;
 
-        // Event Listeners
-        visualizeBtn.addEventListener('click', () => handleVisualizeClick(false));
-        recordBtn.addEventListener('click', () => handleVisualizeClick(true));
-        downloadBtn.addEventListener('click', downloadFiles);
-        speedSlider.addEventListener('input', (e) => {
-            speedValueEl.textContent = e.target.value;
-        });
+      // Event Listeners
+      visualizeBtn.addEventListener("click", () => handleVisualizeClick(false));
+      recordBtn.addEventListener("click", () => handleVisualizeClick(true));
+      downloadBtn.addEventListener("click", downloadFiles);
+      speedSlider.addEventListener("input", (e) => {
+        speedValueEl.textContent = e.target.value;
+      });
 
-        function handleVisualizeClick(isRecording) {
-            const content = textInput.value;
-            if (!content.trim()) {
-                alert("Please paste the generation output into the text area.");
-                return;
-            }
-
-            try {
-                parseContent(content);
-                runAnimation(isRecording);
-            } catch (error) { // FIXED: Added curly braces to the catch block
-                alert(`Error parsing content: ${error.message}`);
-                console.error(error);
-            }
+      function handleVisualizeClick(isRecording) {
+        const content = textInput.value;
+        if (!content.trim()) {
+          alert("Please paste the generation output into the text area.");
+          return;
         }
 
-        function parseContent(content) {
-            generationSteps = [];
-            
-            const promptMatch = content.match(/={25} PROMPT ={25}\n\n([\s\S]*?)\n\n={25}/);
-            promptText = promptMatch ? promptMatch[1].trim() : "Prompt not found.";
+        try {
+          parseContent(content);
+          runAnimation(isRecording);
+        } catch (error) {
+          // FIXED: Added curly braces to the catch block
+          alert(`Error parsing content: ${error.message}`);
+          console.error(error);
+        }
+      }
 
-            const finalGenMatch = content.match(/={25} FINAL GENERATION ={25}\n\n([\s\S]*?)\n\n={25}/);
-            finalCode = finalGenMatch ? finalGenMatch[1].trim() : "Final code not found.";
+      function parseContent(content) {
+        generationSteps = [];
 
-            const historySectionMatch = content.match(/={25} GENERATION HISTORY ={25}\n\n([\s\S]*)/);
-            if (!historySectionMatch) {
-                throw new Error("Generation history section not found.");
-            }
-            const historySection = historySectionMatch[1];
-            
-            const stepsRaw = historySection.trim().split(/--- Step \d+ ---\n/);
-            generationSteps = stepsRaw.slice(1).map(step => step.trim().replace(/\n\n$/, ''));
+        const promptMatch = content.match(
+          /={25} PROMPT ={25}\n\n([\s\S]*?)\n\n={25}/,
+        );
+        promptText = promptMatch ? promptMatch[1].trim() : "Prompt not found.";
 
-            if (generationSteps.length === 0) {
-                throw new Error("No generation steps found in the history section.");
-            }
+        const finalGenMatch = content.match(
+          /={25} FINAL GENERATION ={25}\n\n([\s\S]*?)\n\n={25}/,
+        );
+        finalCode = finalGenMatch
+          ? finalGenMatch[1].trim()
+          : "Final code not found.";
 
-            generationSteps.push(finalCode);
+        const historySectionMatch = content.match(
+          /={25} GENERATION HISTORY ={25}\n\n([\s\S]*)/,
+        );
+        if (!historySectionMatch) {
+          throw new Error("Generation history section not found.");
+        }
+        const historySection = historySectionMatch[1];
+
+        const stepsRaw = historySection.trim().split(/--- Step \d+ ---\n/);
+        generationSteps = stepsRaw
+          .slice(1)
+          .map((step) => step.trim().replace(/\n\n$/, ""));
+
+        if (generationSteps.length === 0) {
+          throw new Error("No generation steps found in the history section.");
         }
 
-        function runAnimation(isRecording) {
-            if (animationTimeout) {
-                clearTimeout(animationTimeout);
-            }
-            
-            visualizeBtn.disabled = true;
-            recordBtn.disabled = true;
+        generationSteps.push(finalCode);
+      }
 
-            promptContentEl.textContent = promptText;
-            promptContainer.style.display = 'block';
+      function runAnimation(isRecording) {
+        if (animationTimeout) {
+          clearTimeout(animationTimeout);
+        }
 
-            codePaneA.innerHTML = '';
-            codePaneB.innerHTML = '';
-            codePaneA.classList.remove('active');
-            codePaneB.classList.remove('active');
+        visualizeBtn.disabled = true;
+        recordBtn.disabled = true;
 
+        promptContentEl.textContent = promptText;
+        promptContainer.style.display = "block";
+
+        codePaneA.innerHTML = "";
+        codePaneB.innerHTML = "";
+        codePaneA.classList.remove("active");
+        codePaneB.classList.remove("active");
+
+        if (isRecording) {
+          recorder = RecordRTC(captureArea, {
+            type: "canvas",
+            recorderType: CanvasRecorder,
+            mimeType: "video/webm",
+            bitsPerSecond: 128000,
+          });
+          recorder.startRecording();
+          recordBtn.classList.add("recording");
+          recordBtn.textContent = "Recording...";
+        }
+
+        let stepIndex = 0;
+
+        function animateNextStep() {
+          if (stepIndex >= generationSteps.length) {
+            visualizeBtn.disabled = false;
+            recordBtn.disabled = false;
             if (isRecording) {
-                recorder = RecordRTC(captureArea, {
-                    type: 'canvas',
-                    recorderType: CanvasRecorder,
-                    mimeType: 'video/webm',
-                    bitsPerSecond: 128000
-                });
-                recorder.startRecording();
-                recordBtn.classList.add('recording');
-                recordBtn.textContent = "Recording...";
+              stopAndDownloadRecording();
             }
+            return;
+          }
 
-            let stepIndex = 0;
-            
-            function animateNextStep() {
-                if (stepIndex >= generationSteps.length) {
-                    visualizeBtn.disabled = false;
-                    recordBtn.disabled = false;
-                    if (isRecording) {
-                        stopAndDownloadRecording();
-                    }
-                    return;
-                }
+          const currentActivePane = activePane === "a" ? codePaneA : codePaneB;
+          const currentInactivePane =
+            activePane === "a" ? codePaneB : codePaneA;
 
-                const currentActivePane = (activePane === 'a') ? codePaneA : codePaneB;
-                const currentInactivePane = (activePane === 'a') ? codePaneB : codePaneA;
-                
-                currentInactivePane.textContent = generationSteps[stepIndex];
-                hljs.highlightElement(currentInactivePane);
+          currentInactivePane.textContent = generationSteps[stepIndex];
+          hljs.highlightElement(currentInactivePane);
 
-                currentActivePane.classList.remove('active');
-                currentInactivePane.classList.add('active');
+          currentActivePane.classList.remove("active");
+          currentInactivePane.classList.add("active");
 
-                activePane = (activePane === 'a') ? 'b' : 'a';
+          activePane = activePane === "a" ? "b" : "a";
 
-                stepIndex++;
-                animationTimeout = setTimeout(animateNextStep, parseInt(speedSlider.value));
-            }
-
-            animationTimeout = setTimeout(animateNextStep, 1500);
+          stepIndex++;
+          animationTimeout = setTimeout(
+            animateNextStep,
+            parseInt(speedSlider.value),
+          );
         }
 
-        function stopAndDownloadRecording() {
-            if (!recorder) return;
-            
-            recorder.stopRecording(function() {
-                const blob = recorder.getBlob();
-                invokeSaveAsDialog(blob, 'Code-Generation-Animation.mp4');
+        animationTimeout = setTimeout(animateNextStep, 1500);
+      }
 
-                recorder = null;
-                recordBtn.classList.remove('recording');
-                recordBtn.textContent = "Record & Export MP4";
-            });
-        }
+      function stopAndDownloadRecording() {
+        if (!recorder) return;
 
+        recorder.stopRecording(function () {
+          const blob = recorder.getBlob();
+          invokeSaveAsDialog(blob, "Code-Generation-Animation.mp4");
 
-        function downloadFiles() {
-            const htmlContent = document.documentElement.outerHTML;
-            downloadAsFile("visualizer.html", htmlContent, "text/html");
-            
-            const readmeContent = `# Code Generation Visualizer\n\nTo use, open \`visualizer.html\` and paste your model output.`;
-            downloadAsFile("README.md", readmeContent, "text/markdown");
+          recorder = null;
+          recordBtn.classList.remove("recording");
+          recordBtn.textContent = "Record & Export MP4";
+        });
+      }
 
-            const exampleContent = `========================= PROMPT =========================\n\nWrite a quick sort algorithm in python.\n\n========================= FINAL GENERATION =========================\n\ndef quick_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[0]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    return quick_sort(left) + middle + quick_sort(right)\n\n========================= GENERATION HISTORY =========================\n\n--- Step 1 ---\n def\n\n--- Step 2 ---\n def quick_sort(arr):\n\n--- Step 3 ---\n def quick_sort(arr):\n    if len(arr) <= 1:\n        return arr\n\n--- Step 4 ---\n def quick_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[0]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n`;
-            downloadAsFile("example_output.txt", exampleContent, "text/plain");
-        }
+      function downloadFiles() {
+        const htmlContent = document.documentElement.outerHTML;
+        downloadAsFile("visualizer.html", htmlContent, "text/html");
 
-        function downloadAsFile(filename, content, mimeType) {
-            const blob = new Blob([content], { type: mimeType });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }
+        const readmeContent = `# Code Generation Visualizer\n\nTo use, open \`visualizer.html\` and paste your model output.`;
+        downloadAsFile("README.md", readmeContent, "text/markdown");
+
+        const exampleContent = `========================= PROMPT =========================\n\nWrite a quick sort algorithm in python.\n\n========================= FINAL GENERATION =========================\n\ndef quick_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[0]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    return quick_sort(left) + middle + quick_sort(right)\n\n========================= GENERATION HISTORY =========================\n\n--- Step 1 ---\n def\n\n--- Step 2 ---\n def quick_sort(arr):\n\n--- Step 3 ---\n def quick_sort(arr):\n    if len(arr) <= 1:\n        return arr\n\n--- Step 4 ---\n def quick_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[0]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n`;
+        downloadAsFile("example_output.txt", exampleContent, "text/plain");
+      }
+
+      function downloadAsFile(filename, content, mimeType) {
+        const blob = new Blob([content], { type: mimeType });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
     </script>
-</body>
+  </body>
 </html>
-

@@ -27,4 +27,3 @@ torchrun --nproc_per_node 4 eval_infill.py \
     --alg "$ALG" \
     --batch_size "$BATCH_SIZE" \
     --use_ddp
-

@@ -7,11 +7,10 @@ from pathlib import Path
 
 from huggingface_hub import create_repo, upload_folder
 
+
 def main():
     """Main function to handle model preparation and upload."""
-    parser = argparse.ArgumentParser(
-        description="Upload a custom Hugging Face model with its self-contained code."
-    )
+    parser = argparse.ArgumentParser(description="Upload a custom Hugging Face model with its self-contained code.")
     parser.add_argument(
         "--model_code_path",
         type=str,
@@ -53,22 +52,22 @@ def main():
     try:
         # --- 2. Copy All Necessary Files ---
         print("\nCopying files to staging directory...")
-        
+
         # Copy checkpoint files
         for f in os.listdir(args.ckpt_dir):
             shutil.copy(os.path.join(args.ckpt_dir, f), staging_dir)
-        
+
         # Copy the single, self-contained model code file
         model_code_source = Path(args.model_code_path)
         if not model_code_source.exists():
             print(f"Error: Model code file not found at {model_code_source}")
             sys.exit(1)
-        
+
         # The destination file MUST be named correctly for auto_map to work.
         model_code_dest = staging_dir / "modeling_qwen2.py"
         print(f"Copying model code from {model_code_source} to {model_code_dest}")
         shutil.copy(model_code_source, model_code_dest)
-        
+
         print("File copying complete.")
 
         # --- 3. Configure `config.json` for Auto-Loading ---
@@ -78,14 +77,12 @@ def main():
             print(f"Error: config.json not found in {args.ckpt_dir}")
             sys.exit(1)
 
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             config_data = json.load(f)
 
-        config_data["auto_map"] = {
-            "AutoModelForCausalLM": "modeling_qwen2.Qwen2ForCausalLM"
-        }
+        config_data["auto_map"] = {"AutoModelForCausalLM": "modeling_qwen2.Qwen2ForCausalLM"}
         config_data["architectures"] = ["Qwen2ForCausalLM"]
-        config_data["trust_remote_code"] = True 
+        config_data["trust_remote_code"] = True
 
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
@@ -97,10 +94,10 @@ def main():
         if not readme_source.exists():
             print(f"Error: README file not found at {readme_source}")
             sys.exit(1)
-        
-        with open(readme_source, "r", encoding="utf-8") as f:
+
+        with open(readme_source, encoding="utf-8") as f:
             readme_content = f.read()
-        
+
         readme_content = readme_content.replace("{repo_id}", args.repo)
 
         with open(staging_dir / "README.md", "w", encoding="utf-8") as f:
@@ -125,6 +122,7 @@ def main():
         print("\nCleaning up temporary staging directory...")
         shutil.rmtree(staging_dir)
         print("Cleanup complete.")
+
 
 if __name__ == "__main__":
     main()
