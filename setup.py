@@ -70,6 +70,7 @@ BASE_REQUIRE = [
     "packaging",
 ]
 
+
 def main():
     # Update install_requires and extras_require
     install_requires = BASE_REQUIRE

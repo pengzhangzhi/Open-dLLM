@@ -18,7 +18,7 @@ def merge_to_hf_pt(load_dir: str, save_path: str, model_assets_dir: str = None):
         output_dir=save_path,
     )
     # remove the module. prefix
-    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     if model_assets_dir is not None:
         config = AutoConfig.from_pretrained(model_assets_dir)
         processor = AutoProcessor.from_pretrained(model_assets_dir, trust_remote_code=True)

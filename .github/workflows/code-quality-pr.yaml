@@ -1,0 +1,27 @@
+# This workflow finds which files were changed, prints them,
+# and runs `pre-commit` on those files.
+
+# Inspired by the sktime library:
+# https://github.com/alan-turing-institute/sktime/blob/main/.github/workflows/test.yml
+
+name: Code Quality PR
+
+on:
+  pull_request:
+    branches: [main, "release/*"]
+
+jobs:
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Run pre-commits
+        uses: pre-commit/action@v3.0.1

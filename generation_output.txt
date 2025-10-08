@@ -2481,7 +2481,7 @@ def func:
 from heapq import heappush, heappop, heappush
 
 def func:
- 
+
         else:
            ] 1
     = []
@@ -2499,7 +2499,7 @@ def func:
 from heapq import heappush, heappop, heappush
 
 def func:
- 
+
         else:
            ] 1
     = []
@@ -2517,7 +2517,7 @@ def func:
 from heapq import heappush, heappop, heappush
 
 def func:
- 
+
         else:
            ] 1
     = []
@@ -2535,7 +2535,7 @@ def func:
 from heapq import heappush, heappop, heappush
 
 def func:
- 
+
         else:
            ] 1
     = []
@@ -2553,7 +2553,7 @@ def func:
 from heapq import heappush, heappop, heappush
 
 def func:
-] 
+]
         else:
            ] 1
     = []
@@ -2571,7 +2571,7 @@ def func:
 from heapq import heappush, heappop, heappush
 
 def func:
-] 
+]
         else:
            ] 1
     = []
@@ -2589,7 +2589,7 @@ def func:
 from heapq import heappush, heappop, heappush
 
 def func:
-] 
+]
         else:
            ] 1
     = []
@@ -2607,7 +2607,7 @@ def func:
 from heapq import heappush, heappop, heappush
 
 def func:
-] 
+]
         else:
            ] 1
     = []
@@ -6691,5 +6691,3 @@ def func(nums: list[list[int]], k: int) -> list[list[int]]:
         result.append(heappop(heap))
     return result
 ```
-
-
