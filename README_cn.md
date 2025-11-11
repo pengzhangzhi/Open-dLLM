@@ -1,7 +1,7 @@
 # 🔥 Open-dLLM: 开源扩散式大语言模型
 
 
-🌍 Languages: [English](README.md) | [中文](README_cn.md)
+🌍 Languages: [English](README.md) | [中文](README_cn.md) | [日本語](README_ja.md)
 
 👉 TL;DR: **Open-dLLM** 是迄今为止最开放的扩散式大语言模型发布 —— 我们开源了 **预训练、评测、推理以及模型权重**。
 
