@@ -274,15 +274,16 @@ We stand on the shoulders of these projects, and hope Open-dLLM contributes back
 
 
 ## 📚 Citation
+[![DOI](https://sandbox.zenodo.org/badge/1049183334.svg)](https://handle.test.datacite.org/10.5072/zenodo.449840)
 
 If you use **Open-dLLM** or **Open-dCoder** in your research, please cite us:
-
-```bibtex
-@misc{opendllm2025,
-  title        = {Open-dLLM: Open Diffusion Large Language Models},
-  author       = {Fred Zhangzhi Peng, Shuibai Zhang, Alex Tong, and contributors},
-  year         = {2025},
-  howpublished = {\url{https://github.com/pengzhangzhi/Open-dLLM}},
-  note         = {Blog: \url{https://oval-shell-31c.notion.site/Open-Diffusion-Large-Language-Model-25e03bf6136480b7a4ebe3d53be9f68a?pvs=74}, 
-                  Model: \url{https://huggingface.co/fredzzp/open-dcoder-0.5B}}
+```latex
+@misc{peng2025opendllm,
+  author = {Peng, Fred Zhangzhi and Zhang, Shuibai and Tong, Alex and contributors},
+  title  = {Open-dLLM: Open Diffusion Large Language Models},
+  year   = {2025},
+  doi    = {10.5072/zenodo.449841},
+  url    = {https://doi.org/10.5072/zenodo.449841},
+  note   = {Software release}
 }
+```
