@@ -1,7 +1,7 @@
 
 # 🔥 Open-dLLM: Open Diffusion Large Language Models
 
-🌍 Languages: [English](README.md) | [中文](README_cn.md)
+🌍 Languages: [English](README.md) | [中文](README_cn.md) | [日本語](README_ja.md)
 
 👉 TL;DR: **Open-dLLM** is the most open release of a diffusion-based large language model to date —  
 including **pretraining, evaluation, inference, and checkpoints**.  
