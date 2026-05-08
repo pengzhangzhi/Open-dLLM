@@ -1,7 +1,7 @@
 
 # 🔥 Open-dLLM: Open Diffusion Large Language Models
 
-🌍 Languages: [English](README.md) | [中文](README_cn.md) | [日本語](README_ja.md)
+🌍 Languages: [English](README.md) | [中文](README_cn.md)
 
 👉 TL;DR: **Open-dLLM** is the most open release of a diffusion-based large language model to date —  
 including **pretraining, evaluation, inference, and checkpoints**.  
@@ -92,7 +92,7 @@ micromamba install -c nvidia/label/cuda-12.3.0 cuda-toolkit -y
 pip install ninja
 
 # install the newest torch with cu121
-pip install torch==2.5.0 --index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu121
 
 pip install "flash-attn==2.7.4.post1" \
   --extra-index-url https://github.com/Dao-AILab/flash-attention/releases/download
@@ -101,10 +101,12 @@ pip install --upgrade --no-cache-dir \
   tensordict torchdata triton>=3.1.0 \
   transformers==4.54.1 accelerate datasets peft hf-transfer \
   codetiming hydra-core pandas pyarrow>=15.0.0 pylatexenc \
-  wandb ninja liger-kernel==0.5.8 \
-  pytest yapf py-spy pyext pre-commit ruff packaging
+  wandb ninja liger-kernel==0.5.8
+# optional
+pip install pytest yapf py-spy pyext pre-commit ruff packaging
 
 pip install -e .
+pip install lm-evaluation-harness/ human-eval-infilling/
 ````
 
 ---
@@ -225,8 +227,8 @@ python3 scripts/download_hf_data.py --repo_id fredzzp/fine_code --local_dir ./da
 
 ```bash
 export TOKENIZERS_PARALLELISM=false
-NNODES=${NNODES:=1}
-NPROC_PER_NODE=4
+NNODES=1
+NPROC_PER_NODE=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 NODE_RANK=${NODE_RANK:=0}
 MASTER_ADDR=${MASTER_ADDR:=0.0.0.0}
 MASTER_PORT=${MASTER_PORT:=12345}
@@ -242,6 +244,28 @@ torchrun --nnodes=$NNODES --nproc-per-node $NPROC_PER_NODE --node-rank $NODE_RAN
   --train.global_batch_size=512 \
   --train.output_dir=logs/Qwen2.5-Coder-0.5B_mdm \
   --train.save_steps=10000
+```
+example of multi-node training with repr alignment loss:
+```bash
+
+export TOKENIZERS_PARALLELISM=false
+
+NNODES=${NNODES:=1}
+NPROC_PER_NODE=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+NODE_RANK=${NODE_RANK:=0}
+MASTER_ADDR=${MASTER_ADDR:=0.0.0.0}
+MASTER_PORT=${MASTER_PORT:=12345}
+torchrun --nnodes=$NNODES --nproc-per-node $NPROC_PER_NODE --node-rank $NODE_RANK   --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT  tasks/train_torch.py \
+configs/pretrain/qwen2_5_coder_500M.yaml --data.train_path=data/data \
+--data.num_workers=0 \
+--data.prefetch_factor=1 \
+--train.ckpt_manager=dcp \
+--train.micro_batch_size=3 \
+--train.global_batch_size=240 \
+--train.repr_align_wt=10.0 \
+--model.model_path=Qwen/Qwen2.5-Coder-3B-Instruct \
+--train.save_steps=10000 \
+--train.output_dir=logs/Qwen2.5-Coder-3B-Instruct_mdm_repr_align-10
 ```
 
 ### Uploading Checkpoints to Hugging Face
@@ -274,16 +298,15 @@ We stand on the shoulders of these projects, and hope Open-dLLM contributes back
 
 
 ## 📚 Citation
-[![DOI](https://sandbox.zenodo.org/badge/1049183334.svg)](https://handle.test.datacite.org/10.5072/zenodo.449840)
 
 If you use **Open-dLLM** or **Open-dCoder** in your research, please cite us:
-```latex
-@misc{peng2025opendllm,
-  author = {Peng, Fred Zhangzhi and Zhang, Shuibai and Tong, Alex and contributors},
-  title  = {Open-dLLM: Open Diffusion Large Language Models},
-  year   = {2025},
-  doi    = {10.5072/zenodo.449841},
-  url    = {https://doi.org/10.5072/zenodo.449841},
-  note   = {Software release}
+
+```bibtex
+@misc{opendllm2025,
+  title        = {Open-dLLM: Open Diffusion Large Language Models},
+  author       = {Fred Zhangzhi Peng, Shuibai Zhang, Alex Tong, and contributors},
+  year         = {2025},
+  howpublished = {\url{https://github.com/pengzhangzhi/Open-dLLM}},
+  note         = {Blog: \url{https://oval-shell-31c.notion.site/Open-Diffusion-Large-Language-Model-25e03bf6136480b7a4ebe3d53be9f68a?pvs=74}, 
+                  Model: \url{https://huggingface.co/fredzzp/open-dcoder-0.5B}}
 }
-```

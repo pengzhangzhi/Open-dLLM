@@ -56,6 +56,7 @@ def build_foundation_model(
     moe_implementation: Optional[Literal["eager", "fused"]] = None,
     init_device: Literal["cpu", "cuda", "meta"] = "cuda",
     config_kwargs: Optional[Dict[str, Any]] = None,
+    make_teacher: bool = False,
 ) -> "PreTrainedModel":
     """
     Builds the foundation model.
@@ -93,5 +94,6 @@ def build_foundation_model(
         weights_path=weights_path,
         empty_init=empty_init,
         init_device=init_device,
+        make_teacher=make_teacher,
     )
     return model

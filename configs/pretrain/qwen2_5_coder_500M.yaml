@@ -17,6 +17,7 @@ data:
 train:
   output_dir: logs/Qwen2.5-Coder-0.5B_mdm
   repr_align_wt: 0.0  # Weight for representation alignment loss (0 = disabled)
+  freeze_layers: ""  # Example: "attn" to freeze attention, "mlp" to freeze FFN, "attn,mlp" for both
   data_parallel_mode: ddp
   ulysses_parallel_size: 1
   global_batch_size: 512
@@ -30,7 +31,7 @@ train:
   optimizer: adamw
   lr: 3.0e-4
   lr_decay_style: cosine
-  lr_warmup_ratio: 0.01
+  lr_warmup_ratio: 0.001
   lr_decay_ratio: 1.0  # Use full training for decay
   lr_min: 3e-6        # Minimum LR
   weight_decay: 0.01
@@ -49,4 +50,8 @@ train:
   save_hf_weights: true
   wandb_project: Qwen2.5-Coder-0.5B
   wandb_name: Qwen2.5-Coder-0.5B-PT
+  wandb_entity: null
   use_wandb: true
+  save_time_interval_minutes: 170 # less than 3 hours
+  auto_resume: true
+  eval_every: 0

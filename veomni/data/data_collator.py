@@ -144,41 +144,77 @@ class DataCollatorWithPositionIDs(DataCollator):
 @dataclass
 class DataCollatorWithPositionIDsMasking(DataCollator):
     """
-    Data collator with masking.
+    Enhanced data collator with masking for MDM training with teacher model support.
+    
+    Generates:
+    - input_ids: masked sequence for student model
+    - casual_input_ids: original unmasked sequence for teacher model  
+    - left_mask: positions to the left of masked tokens for representation alignment
+    - mask_ratio: masking ratio for loss weighting
     """
-    def __init__(self, mask_token_id: int,):
+    def __init__(self, mask_token_id: int):
         self.mask_token_id = mask_token_id
-    def _random_masking(self, input_ids: "torch.Tensor",) -> "torch.Tensor":
+
+    def _random_masking(self, input_ids: "torch.Tensor") -> tuple:
         """
-        Randomly mask input_ids.
+        Randomly mask input_ids and generate alignment masks.
+        
+        Returns:
+            masked_input_ids: input_ids with masked tokens
+            mask_ratio: ratio of masked tokens
+            left_mask: mask indicating positions to the left of masked tokens
         """
         mask_ratio = torch.rand(1, device=input_ids.device).clamp(1/500, 1-1/500)
         mask_indices = torch.rand_like(input_ids.float()) < mask_ratio
-        input_ids[mask_indices] = self.mask_token_id
-        return input_ids, mask_ratio.repeat(input_ids.size(0))
+        
+        # Create left_mask: positions to the left of masked tokens
+        left_mask = torch.zeros_like(input_ids, dtype=torch.float)
+        for i in range(1, input_ids.size(-1)):
+            left_mask[..., i-1] = mask_indices[..., i].float()
+        
+        # Apply masking
+        masked_input_ids = input_ids.clone()
+        masked_input_ids[mask_indices] = self.mask_token_id
+        
+        return masked_input_ids, mask_ratio.repeat(input_ids.size(0)), left_mask
 
     def __call__(self, features: Sequence[Dict[str, "torch.Tensor"]]) -> Dict[str, "torch.Tensor"]:
         batch = {}
+        
+        # Process each input type
         for input_name in features[0].keys():
             if input_name in ("input_ids", "attention_mask", "labels", "position_ids"):
-                # Apply random masking only to input_ids, concatenate all features
                 if input_name == "input_ids":
-                    masked_features = [self._random_masking(feature[input_name]) for feature in features]
-                    batch[input_name] = torch.cat(list(i[0] for i in masked_features), dim=-1).unsqueeze(0)
-                    batch["mask_ratio"] = torch.cat(list(i[1] for i in masked_features), dim=-1).unsqueeze(0)
+                    # Store original input_ids as casual_input_ids for teacher model
+                    casual_input_ids = torch.cat([feature[input_name] for feature in features], dim=-1).unsqueeze(0)
+                    batch["casual_input_ids"] = casual_input_ids
+                    
+                    # Apply masking and generate alignment masks
+                    masking_results = [self._random_masking(feature[input_name]) for feature in features]
+                    batch[input_name] = torch.cat([result[0] for result in masking_results], dim=-1).unsqueeze(0)
+                    batch["mask_ratio"] = torch.cat([result[1] for result in masking_results], dim=-1).unsqueeze(0)
+                    batch["left_mask"] = torch.cat([result[2] for result in masking_results], dim=-1).unsqueeze(0)
                 else:
                     batch[input_name] = torch.cat([feature[input_name] for feature in features], dim=-1).unsqueeze(0)
             else:
                 batch[input_name] = default_collate([feature[input_name] for feature in features])
 
+        # Generate position_ids if not present
         if "position_ids" not in batch:
             batch["position_ids"] = torch.cat(
                 [torch.arange(len(feature["input_ids"])) for feature in features]
             ).unsqueeze(0)
 
+        # Set labels for loss computation (only masked positions matter)
         if "labels" in batch:
+            batch["casual_labels"] = batch["labels"].clone()
+            cu_seqlens = pos2culen(batch["position_ids"])
+            batch["casual_labels"][:, cu_seqlens[1:-1]] = IGNORE_INDEX
             batch["labels"][batch["input_ids"] != self.mask_token_id] = IGNORE_INDEX
+            
         return batch
+    
+    
 @dataclass
 class NoopDataCollator(DataCollator):
     """

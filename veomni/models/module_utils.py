@@ -393,3 +393,35 @@ def save_model_assets(output_dir: Union[str, "os.PathLike"], model_assets: Seque
     if hdfs_dir is not None:
         hput(output_dir, hdfs_upper_dir, force=True, thread_num=32, chunk_thread_num=32, chunk_size=128)
         logger.info(f"Model config and tokenizer uploaded to {hdfs_dir}.")
+
+
+
+class GradientCheckpointingLayer(nn.Module):
+    """Base class for layers with gradient checkpointing.
+
+    This class enables gradient checkpointing functionality for a layer. By default, gradient checkpointing is disabled
+    (`gradient_checkpointing = False`). When `model.set_gradient_checkpointing()` is called, gradient checkpointing is
+    enabled by setting `gradient_checkpointing = True` and assigning a checkpointing function to `_gradient_checkpointing_func`.
+
+    Important:
+
+        When using gradient checkpointing with `use_reentrant=True`, inputs that require gradients (e.g. hidden states)
+        must be passed as positional arguments (`*args`) rather than keyword arguments to properly propagate gradients.
+
+        Example:
+
+            ```python
+            >>> # Correct - hidden_states passed as positional arg
+            >>> out = self.layer(hidden_states, attention_mask=attention_mask)
+
+            >>> # Incorrect - hidden_states passed as keyword arg
+            >>> out = self.layer(hidden_states=hidden_states, attention_mask=attention_mask)
+            ```
+    """
+
+    gradient_checkpointing = False
+
+    def __call__(self, *args, **kwargs):
+        if self.gradient_checkpointing and self.training:
+            return self._gradient_checkpointing_func(partial(super().__call__, **kwargs), *args)
+        return super().__call__(*args, **kwargs)

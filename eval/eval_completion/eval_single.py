@@ -3,7 +3,6 @@ from typing import List, Optional, Union
 
 import torch
 import transformers
-from accelerate import Accelerator
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
@@ -56,6 +55,11 @@ def load_model_auto(pretrained_path, dtype, trust_remote_code, device):
 
 @register_model("custom_coder")
 class CustomCoder(LM):
+    """
+    Simplified single-GPU custom coder model for lm-evaluation-harness.
+    No Accelerator, no distributed training - just pure single-GPU inference.
+    """
+    
     def __init__(
         self,
         pretrained: Union[str, transformers.PreTrainedModel],
@@ -72,19 +76,22 @@ class CustomCoder(LM):
         trust_remote_code: Optional[bool] = True,
         # Other lm-harness params
         max_length: Optional[int] = 2048,
+        init_parallel_state: Optional[bool] = False,  # Default False for single GPU
         **kwargs,
     ) -> None:
         super().__init__()
 
-        # Initialize accelerator for multi-GPU support
-        self.accelerator = Accelerator()
-        self._device = self.accelerator.device
+        # Simple device setup - no Accelerator needed
+        if torch.cuda.is_available():
+            self._device = torch.device(device if device else "cuda:0")
+            eval_logger.info(f"Using device: {self._device}")
+        else:
+            self._device = torch.device("cpu")
+            eval_logger.warning("CUDA not available, using CPU")
+        
         self.batch_size_per_gpu = int(batch_size)
         self.max_length = max_length
         self.trust_remote_code = trust_remote_code
-
-        # Initialize parallel state for custom model
-        self._init_parallel_state()
 
         # Store generation parameters
         self.max_new_tokens = max_new_tokens
@@ -94,39 +101,16 @@ class CustomCoder(LM):
         self.alg = alg
         self.alg_temp = alg_temp
 
-        # Load the custom model and tokenizer
-        self._create_model_and_tokenizer(pretrained, dtype)
-
-    def _init_parallel_state(self):
-        """Initialize parallel state for the custom model."""
-        from veomni.distributed.parallel_state import init_parallel_state
-        import torch.distributed as dist
-
-        # If only 1 process, skip distributed init
-        if self.accelerator.num_processes == 1:
-            eval_logger.info("Single GPU detected. Skipping distributed init.")
-            return
-
-        # Multi-GPU: ensure process group is initialized
-        if not dist.is_initialized():
-            # import pdb; pdb.set_trace()  # Commented out debug statement
-            dist.init_process_group(
-                backend="nccl",   # use "gloo" if CPU-only
-                init_method="env://"
+        # Note: init_parallel_state is kept for API compatibility but ignored
+        # This version is single-GPU only
+        if init_parallel_state:
+            eval_logger.warning(
+                "init_parallel_state=True was passed, but this is the single-GPU version. "
+                "Ignoring parallel state initialization."
             )
 
-        world_size = self.accelerator.num_processes
-        init_parallel_state(
-            dp_size=world_size,
-            tp_size=1,
-            ep_size=1,
-            pp_size=1,
-            cp_size=1,
-            ulysses_size=1,
-            dp_mode="ddp",
-            device_type="cuda",
-            include_sp_in_fsdp=True,
-        )
+        # Load the custom model and tokenizer
+        self._create_model_and_tokenizer(pretrained, dtype)
 
     def _create_model_and_tokenizer(self, pretrained, dtype):
         """Loads the model architecture-agnostically (supports Qwen2, Qwen3, etc.)."""
@@ -139,9 +123,7 @@ class CustomCoder(LM):
         eval_logger.info(f"Loading model from: {pretrained}")
         self.model = load_model_auto(pretrained, dtype, self.trust_remote_code, self._device)
 
-
-        # Set the mask token if not already set. This is crucial for
-        # generation.
+        # Set the mask token if not already set. This is crucial for generation.
         if self.tokenizer.mask_token is None:
             self.tokenizer.add_special_tokens({'mask_token': '[MASK]'})
             self.model.resize_token_embeddings(len(self.tokenizer))
@@ -154,9 +136,11 @@ class CustomCoder(LM):
 
         self.tokenizer.padding_side = "left"
 
-        # Prepare model for distributed training/inference
-        self.model = self.accelerator.prepare(self.model)
+        # Move model to device and set to eval mode (no Accelerator.prepare needed)
+        self.model = self.model.to(self._device)
         self.model.eval()
+        
+        eval_logger.info(f"Model loaded and moved to {self._device}")
 
     def _generate_batch(
         self, prompts: List[str], gen_kwargs: dict = None
@@ -180,7 +164,6 @@ class CustomCoder(LM):
 
         # Use specific yaml parameters: num_return_sequences
         # Other parameters still come from eval.sh (model_args)
-        # Note: do_sample is automatically set to True by MDMGenerationConfig
         num_return_sequences = gen_kwargs.get('num_return_sequences', 1)
 
         # Create a generation configuration object
@@ -188,7 +171,7 @@ class CustomCoder(LM):
             mask_token_id=self.tokenizer.mask_token_id,
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
-            # Parameters from eval.sh (model_args) - unchanged
+            # Parameters from eval.sh (model_args)
             max_new_tokens=self.max_new_tokens,
             steps=self.steps,
             temperature=self.temperature,
@@ -202,13 +185,8 @@ class CustomCoder(LM):
         )
 
         with torch.no_grad():
-            # Access the underlying model when wrapped in DDP
-            model = (
-                self.model.module
-                if hasattr(self.model, 'module')
-                else self.model
-            )
-            outputs = model.diffusion_generate(
+            # No need to check for DDP wrapper - we're single GPU
+            outputs = self.model.diffusion_generate(
                 inputs=inputs.input_ids,
                 generation_config=generation_config,
             )
@@ -228,7 +206,6 @@ class CustomCoder(LM):
         )
         
         # For now, just return the first sequence for each prompt
-        # Since we changed to repeats=10, each call should generate 1 sequence
         generated_texts = []
         for i in range(batch_size):
             start_idx = i * num_seqs
@@ -246,8 +223,6 @@ class CustomCoder(LM):
         """
         res = []
 
-        # Only show progress bar on main process
-        disable_tqdm = disable_tqdm or not self.accelerator.is_main_process
         pbar = tqdm(
             total=len(requests),
             disable=disable_tqdm,
@@ -280,8 +255,7 @@ class CustomCoder(LM):
         return res
 
     # The loglikelihood methods are not required for generation-based tasks
-    # like HumanEval. We can leave them as not implemented to simplify the
-    # initial effort.
+    # like HumanEval. We leave them as not implemented.
     def loglikelihood(self, requests):
         raise NotImplementedError(
             "Loglikelihood not implemented for this model."
@@ -304,11 +278,13 @@ class CustomCoder(LM):
 
     @property
     def rank(self):
-        return self.accelerator.process_index
+        # Always rank 0 for single GPU
+        return 0
 
     @property
     def world_size(self):
-        return self.accelerator.num_processes
+        # Always 1 for single GPU
+        return 1
 
 
 if __name__ == "__main__":
@@ -334,3 +310,4 @@ if __name__ == "__main__":
         upload_results_after_eval(wandb_project_name)
     else:
         print("Wandb project name not provided - skipping wandb logging")
+

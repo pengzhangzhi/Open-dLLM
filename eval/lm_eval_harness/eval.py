@@ -11,47 +11,15 @@ from lm_eval.models.utils import get_dtype
 from lm_eval.__main__ import cli_evaluate
 from tqdm import tqdm
 
-# Import for auto-detection of model architecture
-from transformers import AutoConfig
-from veomni.models.registry import get_registry
-from veomni.models.loader import _get_model_arch_from_config
-from veomni.models.transformers.qwen2.generation_utils import MDMGenerationConfig
+# Import your custom model and generation config
+from veomni.models.transformers.qwen2.modeling_qwen2 import (
+    Qwen2ForCausalLM
+)
+from veomni.models.transformers.qwen2.generation_utils import (
+    MDMGenerationConfig
+)
 
 eval_logger = logging.getLogger("eval_logger")
-
-
-def load_model_auto(pretrained_path, dtype, trust_remote_code, device):
-    """
-    Auto-detect model architecture from config.json and load the corresponding
-    custom model class using the registry system.
-    """
-    eval_logger.info(f"Auto-detecting model architecture from: {pretrained_path}")
-    
-    # Load config to detect architecture
-    config = AutoConfig.from_pretrained(pretrained_path, trust_remote_code=trust_remote_code)
-    model_arch = _get_model_arch_from_config(config)
-    
-    eval_logger.info(f"Detected model architecture: {model_arch}")
-    
-    # Get model class from registry
-    registry = get_registry()
-    if model_arch not in registry.supported_models:
-        raise ValueError(
-            f"Model architecture '{model_arch}' not found in registry. "
-            f"Supported models: {list(registry.supported_models)}"
-        )
-    
-    model_cls = registry.get_model_cls_from_model_arch(model_arch)
-    eval_logger.info(f"Loading model using class: {model_cls.__name__}")
-    
-    # Load model using from_pretrained
-    model = model_cls.from_pretrained(
-        pretrained_path,
-        torch_dtype=get_dtype(dtype),
-        trust_remote_code=trust_remote_code,
-    )
-    
-    return model
 
 
 @register_model("custom_coder")
@@ -129,7 +97,7 @@ class CustomCoder(LM):
         )
 
     def _create_model_and_tokenizer(self, pretrained, dtype):
-        """Loads the model architecture-agnostically (supports Qwen2, Qwen3, etc.)."""
+        """Loads the Qwen2ForCausalLM model and its tokenizer."""
         eval_logger.info(f"Loading tokenizer from: {pretrained}")
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
             pretrained,
@@ -137,8 +105,11 @@ class CustomCoder(LM):
         )
 
         eval_logger.info(f"Loading model from: {pretrained}")
-        self.model = load_model_auto(pretrained, dtype, self.trust_remote_code, self._device)
-
+        self.model = Qwen2ForCausalLM.from_pretrained(
+            pretrained,
+            torch_dtype=get_dtype(dtype),
+            trust_remote_code=self.trust_remote_code,
+        )
 
         # Set the mask token if not already set. This is crucial for
         # generation.

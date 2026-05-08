@@ -46,7 +46,13 @@ from .ulysses import (
     slice_input_tensor,
 )
 from .utils import pad_tensor, unpad_tensor, vlm_images_a2a_meta
-
+from .data import (
+    gather_outputs,
+    sequence_parallel_preprocess,
+    slice_input_tensor,
+    slice_input_tensor_scale_grad,
+    slice_position_embedding,
+)
 
 __all__ = [
     "init_sequence_parallel",
@@ -78,4 +84,9 @@ __all__ = [
     "async_ulysses_output_projection",
     "divide_qkv_linear_weight",
     "divide_qkv_linear_bias",
+    "gather_outputs",
+    "sequence_parallel_preprocess",
+    "slice_input_tensor",
+    "slice_input_tensor_scale_grad",
+    "slice_position_embedding",
 ]

@@ -18,7 +18,9 @@
 import gc
 import logging as builtin_logging
 import os
+import shutil
 import sys
+import time
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -247,6 +249,90 @@ def empty_cache() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+class PeriodicTimer:
+    def __init__(self, interval_seconds: float) -> None:
+        self.interval_seconds = interval_seconds
+        self._last_trigger_time: Optional[float] = None
+
+    def reset(self) -> None:
+        self._last_trigger_time = time.time()
+
+    def should_trigger(self) -> bool:
+        if self.interval_seconds <= 0:
+            return False
+
+        current_time = time.time()
+        if self._last_trigger_time is None:
+            self._last_trigger_time = current_time
+            return False
+
+        if current_time - self._last_trigger_time >= self.interval_seconds:
+            self._last_trigger_time = current_time
+            return True
+
+        return False
+
+
+def save_time_checkpoint(checkpointer, base_dir: str, state: Dict[str, Any]) -> None:
+    if dist.get_world_size() > 1:
+        dist.barrier()
+
+    tmp_dir = os.path.join(base_dir, "tmp")
+    final_dir = os.path.join(base_dir, "latest")
+    backup_dir = os.path.join(base_dir, "latest.bak")
+
+    if dist.get_rank() == 0:
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        os.makedirs(tmp_dir, exist_ok=True)
+
+    if dist.get_world_size() > 1:
+        dist.barrier()
+
+    checkpointer.save(tmp_dir, state)
+
+    if dist.get_world_size() > 1:
+        dist.barrier()
+
+    if dist.get_rank() == 0:
+        if os.path.exists(backup_dir):
+            shutil.rmtree(backup_dir)
+        if os.path.exists(final_dir):
+            os.rename(final_dir, backup_dir)
+        os.rename(tmp_dir, final_dir)
+        if os.path.exists(backup_dir):
+            shutil.rmtree(backup_dir)
+
+    if dist.get_world_size() > 1:
+        dist.barrier()
+
+
+def find_latest_time_checkpoint(base_dir: str) -> Optional[str]:
+    if not os.path.isdir(base_dir):
+        return None
+
+    candidate = os.path.join(base_dir, "latest")
+    if os.path.isdir(candidate):
+        return candidate
+
+    return None
+
+
+def find_latest_step_checkpoint(base_dir: str) -> Optional[str]:
+    if not os.path.isdir(base_dir):
+        return None
+
+    checkpoints = sorted(
+        (os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    if checkpoints:
+        return checkpoints[0]
+
+    return None
 
 
 def get_cache_dir(path: Optional[str] = None) -> str:

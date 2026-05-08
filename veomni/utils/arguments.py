@@ -210,7 +210,7 @@ class TrainingArguments:
         default=0,
         metadata={"help": "L2 regularization strength."},
     )
-    optimizer: Literal["adamw", "anyprecision_adamw"] = field(
+    optimizer: Literal["adamw", "anyprecision_adamw", "apollo", "galore", "scale"] = field(
         default="adamw",
         metadata={"help": "Optimizer. Default to adamw."},
     )
@@ -241,6 +241,10 @@ class TrainingArguments:
     enable_masking: bool = field(
         default=False,
         metadata={"help": "Enable masking during training."},
+    )
+    repr_align_wt: float = field(
+        default=0.0,
+        metadata={"help": "Weight for representation alignment loss (0 = disabled). Used for MDM training with teacher model."},
     )
     dyn_bsz: bool = field(
         default=True,
@@ -370,9 +374,35 @@ class TrainingArguments:
         default=1,
         metadata={"help": "Number of epochs between two checkpoint saves."},
     )
+    save_time_interval_minutes: int = field(
+        default=0,
+        metadata={
+            "help": (
+                "Interval in minutes to save a rolling checkpoint used for auto-resume. "
+                "Set to 0 to disable time-based checkpointing."
+            )
+        },
+    )
+    auto_resume: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Automatically resume from the most recent checkpoint. When enabled,"
+                " time-based checkpoints take precedence over step-based ones."
+            )
+        },
+    )
+    eval_every: int = field(
+        default=0,
+        metadata={"help": "Run HumanEval evaluation every N steps. Set to 0 to disable."},
+    )
     save_hf_weights: bool = field(
         default=True,
         metadata={"help": "Save the huggingface format weights to the last checkpoint dir."},
+    )
+    freeze_layers: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated layer patterns to freeze (e.g., 'attn,mlp'). Uses case-insensitive substring matching."},
     )
     seed: int = field(
         default=42,
@@ -389,6 +419,10 @@ class TrainingArguments:
     wandb_name: Optional[str] = field(
         default=None,
         metadata={"help": "Wandb experiment name."},
+    )
+    wandb_entity: str = field(
+        default=None,
+        metadata={"help": "Wandb entity name."},
     )
     enable_profiling: bool = field(
         default=False,

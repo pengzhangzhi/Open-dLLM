@@ -6,13 +6,46 @@ from typing import List
 from tqdm import tqdm
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoConfig
 from datasets import load_dataset
-from veomni.models.transformers.qwen2.modeling_qwen2 import Qwen2ForCausalLM
-from veomni.models.transformers.qwen2.generation_utils import (
-    MDMGenerationConfig
-)
+from veomni.models.registry import get_registry
+from veomni.models.loader import _get_model_arch_from_config
+from lm_eval.models.utils import get_dtype
 from utils import upload_to_wandb, run_evaluation_tool
+
+
+def load_model_auto(pretrained_path, dtype_str, trust_remote_code, device):
+    """
+    Auto-detect model architecture from config.json and load the corresponding
+    custom model class using the registry system.
+    """
+    print(f"Auto-detecting model architecture from: {pretrained_path}")
+    
+    # Load config to detect architecture
+    config = AutoConfig.from_pretrained(pretrained_path, trust_remote_code=trust_remote_code)
+    model_arch = _get_model_arch_from_config(config)
+    
+    print(f"Detected model architecture: {model_arch}")
+    
+    # Get model class from registry
+    registry = get_registry()
+    if model_arch not in registry.supported_models:
+        raise ValueError(
+            f"Model architecture '{model_arch}' not found in registry. "
+            f"Supported models: {list(registry.supported_models)}"
+        )
+    
+    model_cls = registry.get_model_cls_from_model_arch(model_arch)
+    print(f"Loading model using class: {model_cls.__name__}")
+    
+    # Load model using from_pretrained
+    model = model_cls.from_pretrained(
+        pretrained_path,
+        torch_dtype=get_dtype(dtype_str),
+        trust_remote_code=trust_remote_code,
+    )
+    
+    return model
 
 
 def infilling(
@@ -32,6 +65,8 @@ def infilling(
     rank: int = 0
 ) -> List[str]:
     """Code infilling function similar to generator_temp.py"""
+    # Import generation config here to avoid circular imports
+    from veomni.models.transformers.qwen2.generation_utils import MDMGenerationConfig
     # Tokenize prompts
     tokenized_prompts = [
         tokenizer.encode(p, add_special_tokens=True) for p in prompts
@@ -197,11 +232,8 @@ def eval_infill(
             include_sp_in_fsdp=True,
         )
     
-    model = Qwen2ForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True
-    )
+    # Load model architecture-agnostically (supports Qwen2, Qwen3, etc.)
+    model = load_model_auto(model_path, "bfloat16", True, device)
     
     if use_ddp:
         model = model.to(local_rank)

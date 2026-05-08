@@ -133,7 +133,14 @@ class CustomizedModelingLoader(BaseModelLoader):
             input_embeddings = model.get_input_embeddings()
             output_embeddings = model.get_output_embeddings()
             output_embeddings._parameters["weight"] = input_embeddings._parameters["weight"]
-
+        if kwargs.get("make_teacher", False):
+            print("make_teacher")
+            import copy
+            teacher_model = copy.deepcopy(model)
+            teacher_model.eval()
+            for param in teacher_model.parameters():
+                param.requires_grad = False
+            model.teacher_model = teacher_model
         return model
 
 

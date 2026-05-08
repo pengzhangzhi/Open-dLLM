@@ -295,6 +295,7 @@ class DistributedCheckpointer(CheckpointerBase):
             extra_state_path = os.path.join(extra_state_dir, _EXTRA_STATE_FORMAT.format(dist.get_rank()))
             state["extra_state"] = torch.load(
                 extra_state_path,
+                weights_only=False,
             )
 
         logger.info_rank0(f"Loaded checkpoint from {checkpoint_dir}")
