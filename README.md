@@ -7,9 +7,9 @@
 including **pretraining, evaluation, inference, and checkpoints**.  
 
 
-## Representation Alignment
+#### Representation Alignment
 
-Open-dLLM supports **representation alignment** for adapting autoregressive LMs into diffusion LMs with 4x speedup. This feature is based on our recent paper, **Don’t Retrain—Align: Adapting Autoregressive LMs to Diffusion LMs via Representation Alignment**. Check out [Representation Alignment Tutorial](docs/representation_alignment.md)
+Open-dLLM supports **representation alignment** for adapting autoregressive LMs into diffusion LMs with 4x speedup. This feature is based on our recent paper, **Don’t Retrain—Align: Adapting Autoregressive LMs to Diffusion LMs via Representation Alignment**. Check out [Representation Alignment Tutorial](docs/representation_alignment.md).
 
 
 <p align="center">
