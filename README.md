@@ -6,7 +6,10 @@
 👉 TL;DR: **Open-dLLM** is the most open release of a diffusion-based large language model to date —  
 including **pretraining, evaluation, inference, and checkpoints**.  
 
-This repo introduces **Open-dCoder**, the **code-generation variant** of Open-dLLM. 
+
+## Representation Alignment
+
+Open-dLLM supports **representation alignment** for adapting autoregressive LMs into diffusion LMs with 4x speedup. This feature is based on our recent paper, **Don’t Retrain—Align: Adapting Autoregressive LMs to Diffusion LMs via Representation Alignment**. Check out [Representation Alignment Tutorial](docs/representation_alignment.md)
 
 
 <p align="center">
