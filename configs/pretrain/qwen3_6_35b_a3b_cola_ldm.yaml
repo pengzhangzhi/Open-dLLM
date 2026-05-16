@@ -1,0 +1,100 @@
+# Repr-Align + Cola DLM (Text VAE + block-causal DiT)
+# ----------------------------------------------------
+# Cola DLM paper: arXiv:2605.06548 (Continuous Latent Diffusion LM).
+# Adapted as an opt-in auxiliary head on top of the existing Repr-Align
+# training path. See docs/cola_ldm.md.
+#
+# Target: 2x consumer GPUs (e.g. 5090 32GB + 4090 24GB).
+# Base:   Qwen3.6-35B-A3B MoE (3B active, hidden=2048).
+#
+# Launch (2 GPUs, FSDP1 over both the student and the Cola head):
+#   export TOKENIZERS_PARALLELISM=false
+#   torchrun --nnodes=1 --nproc-per-node=2 tasks/train_torch.py \
+#       configs/pretrain/qwen3_6_35b_a3b_cola_ldm.yaml
+#
+# Memory budget (rough, bf16, grad ckpt on):
+#   - 35B-A3B student (sharded)        ~9-11 GB / GPU
+#   - 35B-A3B teacher (frozen, sharded) ~5-6  GB / GPU
+#   - Cola head (~250 M, sharded)       ~0.3  GB / GPU
+#   - Activations + opt state: rest
+# If you OOM: drop max_seq_len to 384, or set
+#   train.freeze_layers: "mlp" to cut grad memory.
+
+model:
+  model_path: Qwen/Qwen3.6-35B-A3B
+  attn_implementation: eager
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 100000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 512
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /run/media/johndpope/12TB/open_dllm/checkpoints/35b_a3b_cola_ldm
+  data_parallel_mode: fsdp1
+  ulysses_parallel_size: 1
+  global_batch_size: 16
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 200
+
+  # ---- Repr-Align (existing) ----
+  enable_masking: true
+  repr_align_wt: 1.0
+  freeze_layers: ""
+
+  # ---- Cola DLM (new — Text VAE encoder + block-causal DiT) ----
+  # Set cola_wt > 0 to enable. Start small (0.1–0.5) to confirm the
+  # head doesn't drag total loss in the wrong direction, then crank up.
+  cola_wt: 0.5
+  cola_num_global: 16        # coarse semantic latents (Text VAE global stream)
+  cola_num_local: 64         # local detail latents      (Text VAE local stream)
+  cola_block_size: 16        # local chunk size for the block-causal DiT mask
+  cola_encoder_depth: 2      # per-Perceiver depth (kept small for VRAM)
+  cola_diffusion_depth: 4    # block-causal DiT depth
+  cola_heads: 8
+  cola_source_layer: -3      # third-to-last LM hidden layer (matches LDLM choice)
+  cola_detach_student: true  # safer default; flip after warmup if desired
+  cola_log_hist_every: 200
+  cola_prediction: v         # "v" = Flow Matching velocity (paper default), "x0" = legacy MSE
+
+  # ---- Optimizer / schedule ----
+  optimizer: adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # ---- Memory / precision ----
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: true
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cpu
+  enable_full_determinism: false
+  empty_cache_steps: 100
+
+  # ---- Checkpointing / logging ----
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 500
+  save_hf_weights: true
+  use_wandb: true
+  wandb_project: Qwen3.6-35B-A3B-Cola-DLM
+  wandb_name: 35b-a3b-cola-ldm-w1.0-c0.5
+  auto_resume: true
+  save_time_interval_minutes: 170

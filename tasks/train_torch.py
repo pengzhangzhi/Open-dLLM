@@ -257,6 +257,45 @@ def main():
     freeze_layers_by_patterns(model, args.train.freeze_layers, logger)
     helper.print_device_mem_info("VRAM usage after building model")
 
+    # ------------------------------------------------------------------
+    # Optional: wrap with Cola DLM (Text VAE + block-causal DiT) aux head.
+    # Off when cola_wt == 0. See veomni/models/cola_ldm/.
+    # ------------------------------------------------------------------
+    if args.train.cola_wt > 0:
+        from veomni.models.cola_ldm import ColaDLMHead, ColaReprAlignWrapper
+
+        cfg = model.config
+        if hasattr(cfg, "text_config") and hasattr(cfg.text_config, "hidden_size"):
+            base_dim = cfg.text_config.hidden_size
+        else:
+            base_dim = cfg.hidden_size
+
+        cola_head = ColaDLMHead(
+            dim=base_dim,
+            num_global=args.train.cola_num_global,
+            num_local=args.train.cola_num_local,
+            block_size=args.train.cola_block_size,
+            encoder_depth=args.train.cola_encoder_depth,
+            diffusion_depth=args.train.cola_diffusion_depth,
+            heads=args.train.cola_heads,
+            prediction_type=args.train.cola_prediction,
+        )
+        n_cola_params = sum(p.numel() for p in cola_head.parameters())
+        logger.info_rank0(
+            f"Cola head: dim={base_dim} global={args.train.cola_num_global} "
+            f"local={args.train.cola_num_local} block={args.train.cola_block_size} "
+            f"enc_depth={args.train.cola_encoder_depth} diff_depth={args.train.cola_diffusion_depth} "
+            f"pred={args.train.cola_prediction} "
+            f"params={n_cola_params/1e6:.1f}M  detach_student={args.train.cola_detach_student}"
+        )
+
+        model = ColaReprAlignWrapper(
+            lm=model,
+            cola_head=cola_head,
+            cola_wt=args.train.cola_wt,
+            cola_source_layer=args.train.cola_source_layer,
+            cola_detach_student=args.train.cola_detach_student,
+        )
 
     get_optimizer_pre_hook = getattr(model, "get_optimizer_pre_hook", None)
     model = build_parallelize_model(
@@ -267,7 +306,7 @@ def main():
         enable_mixed_precision=args.train.enable_mixed_precision,
         enable_gradient_checkpointing=args.train.enable_gradient_checkpointing,
         enable_fsdp_offload=args.train.enable_fsdp_offload,
-        basic_modules=model._no_split_modules + args.model.basic_modules,
+        basic_modules=list(model._no_split_modules) + args.model.basic_modules,
         enable_reentrant=args.train.enable_reentrant,
         enable_forward_prefetch=args.train.enable_forward_prefetch,
     )
@@ -448,6 +487,40 @@ def main():
                     train_metrics.update(
                         {"training/loss": total_loss, "training/grad_norm": grad_norm, "training/lr": lr}
                     )
+                    # ----------------------------------------------------------
+                    # Cola DLM extras (only when active). Scalars already
+                    # live in step_loss_components → train_metrics; here
+                    # we add (a) a separate grad-norm of the Cola head and
+                    # (b) periodic histograms of z_global / z_local.
+                    # ----------------------------------------------------------
+                    if args.train.cola_wt > 0:
+                        # Cola head grad norm (rank-local; informative even
+                        # without all-reduce since FSDP shards uniformly).
+                        try:
+                            cola_root = model
+                            for attr in ("module", "lm"):
+                                if hasattr(cola_root, "cola_head"):
+                                    break
+                                cola_root = getattr(cola_root, attr, cola_root)
+                            cola_module = getattr(cola_root, "cola_head", None)
+                            if cola_module is not None:
+                                cg = 0.0
+                                for p in cola_module.parameters():
+                                    if p.grad is not None:
+                                        cg += float(p.grad.data.float().norm(2).item()) ** 2
+                                train_metrics["cola/grad_norm"] = cg ** 0.5
+                        except Exception:
+                            pass
+
+                        # Periodic histograms (cheap-ish — z_global/local are tiny)
+                        hist_every = max(int(args.train.cola_log_hist_every), 0)
+                        extras = getattr(outputs, "cola_extras", None)
+                        if hist_every > 0 and extras is not None and global_step % hist_every == 0:
+                            zg = extras["z_global"].flatten().numpy()
+                            zl = extras["z_local"].flatten().numpy()
+                            train_metrics["cola_hist/z_global"] = wandb.Histogram(zg)
+                            train_metrics["cola_hist/z_local"] = wandb.Histogram(zl)
+
                     wandb.log(train_metrics, step=global_step)
 
                 if args.train.enable_profiling and global_step <= args.train.profile_end_step:

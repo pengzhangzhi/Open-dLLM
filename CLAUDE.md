@@ -27,12 +27,18 @@ No single-file test runner is configured; use `pytest tests/path/test_file.py` d
 
 ## Architecture
 
-### Training Pipeline (`tasks/train_torch.py`)
-Single entry point for all training. Configs are YAML files consumed by a Hydra-style argument parser (`veomni/utils/arguments.py`). Three dataclass groups: `ModelArguments`, `DataArguments`, `TrainingArguments`.
+### Training Entry Points (`tasks/`)
+Two training scripts, both YAML-driven via the Hydra-style argument parser in `veomni/utils/arguments.py` (three dataclass groups: `ModelArguments`, `DataArguments`, `TrainingArguments`):
 
-- **Pretraining configs**: `configs/pretrain/` (plaintext datasets, FSDP1 or DDP)
-- **SFT configs**: `configs/sft/` (conversation data, DeepSeek MoE support)
-- **Multimodal configs**: `configs/multimodal/` (vision-language, omni-modal, representation alignment)
+- **`tasks/train_torch.py`** — standard MDM training. Also handles the **Repr-Align** path (bidirectional student + frozen causal teacher) when `train.repr_align_wt > 0` and/or `train.enable_masking=true`. Uses FSDP1 or DDP across all visible GPUs.
+- **`tasks/train_ldlm.py`** — **LDLM** training (Perceiver encoder/decoder + DiT head on top of a frozen AR encoder). Manages multi-GPU placement internally via `device_map="auto"` — frozen encoder on GPU 0, trainable components on GPU 1. Always launch with `--nproc_per_node=1`.
+- **`tasks/benchmark_ldlm.py`** / **`benchmark_ldlm_35b.py`** — throughput benchmarks for the 27B / 35B-A3B LDLM (encoder deleted, inference-only).
+- **`tasks/infer.py`**, **`sample.py`** — generation entry points using `model.diffusion_generate()`.
+
+Configs:
+- **Pretraining**: `configs/pretrain/` — plaintext datasets, FSDP1/DDP. Includes `qwen3_6_27b_ldlm.yaml`, `qwen3_6_35b_a3b_ldlm.yaml`, `qwen3_6_35b_a3b_repr_align.yaml`.
+- **SFT**: `configs/sft/` — conversation data, DeepSeek MoE support.
+- **Multimodal**: `configs/multimodal/` — vision-language, omni-modal, representation alignment.
 
 ### Model Implementations (`veomni/models/transformers/`)
 Each model family is a subpackage with its own `modeling_*.py` and optional `generation_utils.py`:
@@ -77,4 +83,27 @@ Primary manager is `bytecheckpoint` with DCP (Distributed Checkpoint) format. `m
 - Diffusion generation uses `model.diffusion_generate()` with `MDMGenerationConfig` (mask tokens, steps, algorithm selection like `p2`)
 - All model classes use `trust_remote_code=True`
 - Config files reference HDFS paths for ByteDance internal clusters; local development uses HF model paths
-- Representation alignment (repr_align) trains a diffusion LM by aligning to autoregressive teacher representations — configured via `repr_align_wt` in training YAMLs
+
+### Two diffusion paths
+The repo supports two distinct ways of producing a diffusion LM (don't confuse them):
+
+1. **Repr-Align** (`train_torch.py` with `repr_align_wt > 0`) — flips the AR model's attention mask to bidirectional and adds a cosine-sim alignment loss against a frozen causal teacher's hidden states. **No new parameters** — reuses the existing model weights. 3-4× faster convergence. Built into `modeling_qwen2.py`, `modeling_qwen3.py`, `modeling_qwen3_5_moe.py`.
+2. **LDLM** (`train_ldlm.py`) — trains a new Perceiver encoder/decoder + DiT head (1.39B–6.75B params) on top of a **frozen** AR encoder. Latent-space diffusion. Heavier but more expressive. Implementation in `veomni/models/ldlm/` (LDLMAutoencoder).
+
+If the user says "train a diffusion model" without specifying, ask which path they want. Repr-Align is the default recommendation for converting an existing AR model.
+
+## Local Data & Models
+
+Training data and pre-initialized model checkpoints live on an external 12TB drive:
+
+- **Training data** (FineWeb 100K sample): `/run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl` (~300MB, 100K plaintext examples)
+- **35B-A3B LDLM untrained checkpoint**: `/run/media/johndpope/12TB/open_dllm/ldlm_model/ldlm_35b_a3b_untrained.pt` (~5.5GB, state dict with keys: `latent_encoder`, `latent_decoder`, `token_decoder`, `lm_head`, `diffusion_head`, `config`)
+- **27B LDLM untrained checkpoint**: `/run/media/johndpope/12TB/open_dllm/ldlm_model/ldlm_untrained.pt` (~27GB)
+- **Training checkpoints output**: `/run/media/johndpope/12TB/open_dllm/checkpoints/35b_a3b_ldlm/`
+
+The 35B-A3B config (`configs/pretrain/qwen3_6_35b_a3b_ldlm.yaml`) points to these paths. Launch with:
+```bash
+torchrun --nproc_per_node=1 tasks/train_ldlm.py configs/pretrain/qwen3_6_35b_a3b_ldlm.yaml
+```
+
+**Multi-GPU**: Always use `--nproc_per_node=1`. The script places the frozen encoder on GPU 0 via `device_map="auto"` and trainable components (Perceiver, diffusion head) on GPU 1. Do NOT use `--nproc_per_node=2`.

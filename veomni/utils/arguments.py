@@ -250,6 +250,55 @@ class TrainingArguments:
         default=0.0,
         metadata={"help": "Weight for representation alignment loss (0 = disabled). Used for MDM training with teacher model."},
     )
+    # ------------------------------------------------------------------
+    # Cola DLM (Continuous Latent Diffusion LM, arXiv:2605.06548)
+    # auxiliary head on top of Repr-Align. Off when cola_wt == 0.
+    # See veomni/models/cola_ldm/.
+    # ------------------------------------------------------------------
+    cola_wt: float = field(
+        default=0.0,
+        metadata={"help": "Weight for Cola DLM auxiliary loss (Text VAE + block-causal DiT). 0 = disabled."},
+    )
+    cola_num_global: int = field(
+        default=16,
+        metadata={"help": "Number of global semantic latents in the Cola Text VAE encoder."},
+    )
+    cola_num_local: int = field(
+        default=64,
+        metadata={"help": "Number of local detail latents in the Cola Text VAE encoder."},
+    )
+    cola_block_size: int = field(
+        default=16,
+        metadata={"help": "Local block size for the Cola block-causal DiT attention mask."},
+    )
+    cola_encoder_depth: int = field(
+        default=2,
+        metadata={"help": "Depth of each Perceiver in the Cola Text VAE encoder."},
+    )
+    cola_diffusion_depth: int = field(
+        default=4,
+        metadata={"help": "Depth of the Cola block-causal DiT."},
+    )
+    cola_heads: int = field(
+        default=8,
+        metadata={"help": "Number of attention heads in the Cola head (must divide hidden dim)."},
+    )
+    cola_source_layer: int = field(
+        default=-3,
+        metadata={"help": "Which LM hidden-state layer to feed into the Cola head (-1 = last)."},
+    )
+    cola_detach_student: bool = field(
+        default=True,
+        metadata={"help": "Detach LM hidden states before the Cola head so its gradient doesn't flow into the student."},
+    )
+    cola_log_hist_every: int = field(
+        default=200,
+        metadata={"help": "How often (in global steps) to log Cola latent histograms to wandb. Set 0 to disable."},
+    )
+    cola_prediction: str = field(
+        default="v",
+        metadata={"help": "Cola DiT prediction target: 'v' (Flow Matching velocity, paper default) or 'x0' (x0-prediction MSE)."},
+    )
     dyn_bsz: bool = field(
         default=True,
         metadata={"help": "Enable dynamic batch size for padding-free training."},
