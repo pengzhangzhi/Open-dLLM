@@ -107,3 +107,13 @@ torchrun --nproc_per_node=1 tasks/train_ldlm.py configs/pretrain/qwen3_6_35b_a3b
 ```
 
 **Multi-GPU**: Always use `--nproc_per_node=1`. The script places the frozen encoder on GPU 0 via `device_map="auto"` and trainable components (Perceiver, diffusion head) on GPU 1. Do NOT use `--nproc_per_node=2`.
+
+## Local Training Hardware
+
+See **`docs/local_training.md`** for the full inventory and upgrade path analysis of the user's local boxes (HP Z6 G4, MSI 5090+RTX PRO 4000), the 35B-A3B Repr-Align memory budget, the split-compute architecture (anchor precompute on MSI → student train on Z6), and the rent-vs-buy decision tree.
+
+Key facts to keep in mind without re-reading the doc:
+- **HP Z6 G4** = Xeon Silver 4108 (Skylake-SP, no PMEM), 48 GB DDR4 mixed, RTX 3090 + Quadro P2000, 6 DIMM slots (1-DPC → Memory Mode Optane impossible regardless of CPU).
+- Repr-Align teacher is a frozen anchor (not distillation) → precompute hidden states **once**, cache to the 12 TB drive, reuse forever. Don't build live RPC teacher infra.
+- Cache 4–8 selected layers (not all 40) to keep precompute under 7 TB.
+- 35B-A3B student state is ~580 GB; no on-hand machine fits this without CPU offload. Default to **renting 8× H100** ($300–500 per epoch) unless a sustained-local-iteration case is made.

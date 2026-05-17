@@ -16,6 +16,7 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/model_loader/loader.py
 
 from abc import ABC
+from typing import Optional
 
 import torch
 from transformers import (
@@ -133,13 +134,43 @@ class CustomizedModelingLoader(BaseModelLoader):
             output_embeddings = model.get_output_embeddings()
             output_embeddings._parameters["weight"] = input_embeddings._parameters["weight"]
         if kwargs.get("make_teacher", False):
-            print("make_teacher")
-            import copy
-            teacher_model = copy.deepcopy(model)
-            teacher_model.eval()
-            for param in teacher_model.parameters():
-                param.requires_grad = False
-            model.teacher_model = teacher_model
+            # Parse align_layers CSV → list[int]; attach to student so the
+            # repr_align loss subsets to those indices.
+            align_layers_str = kwargs.get("align_layers")
+            align_layers: Optional[list] = None
+            if align_layers_str:
+                align_layers = sorted({int(x) for x in align_layers_str.split(",") if x.strip()})
+                if hasattr(model, "align_layers"):
+                    model.align_layers = align_layers
+                else:
+                    setattr(model, "align_layers", align_layers)
+
+            anchor_cache_dir = kwargs.get("anchor_cache_dir")
+            if anchor_cache_dir:
+                # Precomputed-anchor path: skip the deepcopy entirely, save
+                # ~70 GB for a 35B teacher. Cache contract is verified by
+                # CachedTeacher against the student's config.
+                from .cached_teacher import CachedTeacher
+                if align_layers is None:
+                    raise ValueError(
+                        "train.align_layers must be set when train.anchor_cache_dir is set "
+                        "(the cache only stores a subset of layers, not all of them)."
+                    )
+                print(f"[loader] using CachedTeacher from {anchor_cache_dir} (layers={align_layers})")
+                cfg = model.config
+                model.teacher_model = CachedTeacher(
+                    cache_dir=anchor_cache_dir,
+                    num_hidden_layers=cfg.num_hidden_layers,
+                    hidden_size=cfg.hidden_size,
+                )
+            else:
+                print("make_teacher (live deepcopy)")
+                import copy
+                teacher_model = copy.deepcopy(model)
+                teacher_model.eval()
+                for param in teacher_model.parameters():
+                    param.requires_grad = False
+                model.teacher_model = teacher_model
         return model
 
 

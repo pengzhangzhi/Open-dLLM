@@ -1,0 +1,58 @@
+model:
+  model_path: Qwen/Qwen2.5-Coder-0.5B
+  attn_implementation: tropical   # min-plus LogSumExp attention via tensor cores
+  tau: 0.1                        # temperature: 1.0=soft-tropical, 0.01=hard-min
+
+data:
+  train_path: ./hf_data/fine_code/data
+  train_size: 1_000_000_000_000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 4096
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  prefetch_factor: 2
+  num_workers: 2
+
+train:
+  output_dir: logs/Qwen2.5-Coder-0.5B_tropical
+  repr_align_wt: 0.0              # set >0 to enable representation alignment (e.g. 0.1)
+  freeze_layers: ""
+  data_parallel_mode: ddp
+  ulysses_parallel_size: 1
+  global_batch_size: 512
+  micro_batch_size: 8
+  rmpad: false
+  rmpad_with_pos_ids: true
+  enable_masking: true
+  bsz_warmup_ratio: 0.00
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 100
+  optimizer: adamw
+  lr: 3.0e-4
+  lr_decay_style: cosine
+  lr_warmup_ratio: 0.001
+  lr_decay_ratio: 1.0
+  lr_min: 3e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  enable_mixed_precision: false
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 1000
+  ckpt_manager: bytecheckpoint
+  load_checkpoint_path: ""
+  save_steps: 10_000
+  save_hf_weights: true
+  wandb_project: Qwen2.5-Coder-0.5B-Tropical
+  wandb_name: Qwen2.5-Coder-0.5B-Tropical-tau0.1
+  wandb_entity: null
+  use_wandb: false
+  save_time_interval_minutes: 170
+  auto_resume: true
+  eval_every: 0

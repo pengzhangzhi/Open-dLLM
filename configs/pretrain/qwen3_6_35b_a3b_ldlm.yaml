@@ -20,8 +20,8 @@ model:
     log_samples: true
 
 data:
-  train_path: fineweb
-  train_size: 1000000000000
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 100000
   dataloader_type: native
   data_type: plaintext
   max_seq_len: 64
@@ -29,7 +29,7 @@ data:
   drop_last: true
 
 train:
-  output_dir: Qwen3.6-35B-A3B_LDLM
+  output_dir: /run/media/johndpope/12TB/open_dllm/checkpoints/35b_a3b_ldlm
   data_parallel_mode: ddp
   ulysses_parallel_size: 1
   global_batch_size: 16

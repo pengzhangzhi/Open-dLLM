@@ -180,6 +180,41 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+def tropical_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    tau: float = 0.1,
+    **kwargs,
+):
+    """
+    Tropical (min-plus) attention via LogSumExp identity:
+      min_k(Q_ik + K_jk) ≈ -τ·log(Σ_k exp(-Q·s/τ)·exp(-K·s/τ))
+    The inner sum is a standard matmul → tensor cores.
+    Clamp exp inputs to [-44, 44] to prevent fp32 overflow at low τ.
+    """
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    q_exp = torch.exp((-query.float() * scaling / tau).clamp(-44, 44))
+    k_exp = torch.exp((-key_states.float() * scaling / tau).clamp(-44, 44))
+
+    C = torch.matmul(q_exp, k_exp.transpose(2, 3))                   # (B,H,S_q,S_k)
+    scores = tau * torch.log(C.clamp(min=1e-30))                      # tropical similarity
+
+    if attention_mask is not None:
+        scores = scores + attention_mask[:, :, :, : key_states.shape[-2]]
+
+    attn_probs = nn.functional.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_output = torch.matmul(attn_probs, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_probs
+
+
 class Qwen2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -236,7 +271,10 @@ class Qwen2Attention(nn.Module):
             sliding_window = self.config.sliding_window
 
         attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
+        if self.config._attn_implementation == "tropical":
+            attention_interface = tropical_attention_forward
+            kwargs["tau"] = getattr(self.config, "tau", 0.1)
+        elif self.config._attn_implementation != "eager":
             if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
                 logger.warning_once(
                     "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
@@ -357,9 +395,17 @@ class Qwen2RotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        if self.rope_type not in ROPE_INIT_FUNCTIONS:
+            # 'default' or unknown: standard RoPE; extract rope_theta from rope_scaling if present
+            head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+            base = getattr(config, "rope_theta", 10000.0)
+            if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+                base = config.rope_scaling.get("rope_theta", base)
+            inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float() / head_dim))
+            self.attention_scaling = 1.0
+        else:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
@@ -829,7 +875,7 @@ class KwargsForCausalLM(FlashAttentionKwargs, ): ...
 
 
 class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
@@ -1065,7 +1111,14 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
                     loss = loss_fct(self.lm_head.weight, hidden_states, labels)
                     loss_components["ar"] = loss.detach()
             else:
-                raise ValueError("linger kernel is not available for training.")
+                import torch.nn.functional as _F
+                # labels already shifted to (S-1,) at line ~936 for non-SP path
+                logits = self.lm_head(hidden_states[..., :-1, :].contiguous())
+                loss = _F.cross_entropy(
+                    logits.view(-1, self.config.vocab_size),
+                    labels.view(-1),
+                    ignore_index=IGNORE_INDEX,
+                )
 
             if get_parallel_state().sp_enabled:
                 num_valid_tokens = (labels != IGNORE_INDEX).sum()

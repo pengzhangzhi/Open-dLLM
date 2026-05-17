@@ -1,0 +1,92 @@
+# Repr-Align smoke test on Qwen3-1.7B with PRECOMPUTED anchor cache.
+#
+# Goal: validate the full Repr-Align pipeline (data → mask → student forward →
+# cached anchor lookup → cosine loss → MDM loss → backward → step → wandb)
+# end-to-end on the MSI box (5090 + 96 GB RAM), at $0, in a few hours.
+#
+# This is the "does the code work" run, not a "produce a real model" run.
+# Loss should drop on the tiny 1000-example set, cosine alignment should
+# climb toward 1.0. Once verified, the same code scales to 35B-A3B.
+#
+# Prerequisite:
+#   python scripts/precompute_anchor.py \
+#       --model_path Qwen/Qwen3-1.7B \
+#       --data_path /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl \
+#       --output_dir /home/johndpope/ds_offload/anchors/qwen3-1.7b \
+#       --layers 7,14,21,28 \
+#       --max_seq_len 2048 \
+#       --batch_size 8 \
+#       --max_examples 1000
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=1 torchrun --nproc_per_node=1 \
+#       tasks/train_torch.py configs/pretrain/qwen3_1_7b_repr_align_smoke.yaml
+#
+# (CUDA_VISIBLE_DEVICES=1 pins to the 5090. The PRO 4000 sits idle.)
+
+model:
+  model_path: Qwen/Qwen3-1.7B
+  attn_implementation: flash_attention_2
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 1000               # smoke test — match precompute --max_examples
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048              # must match precompute --max_seq_len
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qwen3-1.7b-repr-align-smoke
+  data_parallel_mode: ddp
+  ulysses_parallel_size: 1
+  global_batch_size: 8
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true       # required by enable_masking path
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align core
+  enable_masking: true
+  repr_align_wt: 1.0
+  # Precomputed-anchor cache. CachedTeacher is built instead of deepcopy'ing
+  # the teacher → no extra ~3 GB of GPU memory for a second model copy.
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3-1.7b
+  align_layers: "7,14,21,28"     # 4 layers across Qwen3-1.7B's 28-block stack
+  freeze_layers: ""
+
+  # Optimisation
+  optimizer: adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false        # 1.7B fits on 5090 without sharding
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100                 # frequent so the run produces artefacts quickly
+  save_hf_weights: false          # smoke test — DCP only
+  auto_resume: true
+  save_time_interval_minutes: 60
+
+  use_wandb: true
+  wandb_project: open-dllm-smoke
+  wandb_name: qwen3-1.7b-repr-align-cached-anchors

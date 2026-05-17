@@ -71,9 +71,13 @@ class ModelArguments:
         default=False,
         metadata={"help": "Whether to encode target with decoder. Only supports stable diffusion as decoder."},
     )
-    attn_implementation: Optional[Literal["eager", "sdpa", "flash_attention_2"]] = field(
+    attn_implementation: Optional[Literal["eager", "sdpa", "flash_attention_2", "tropical"]] = field(
         default="flash_attention_2",
-        metadata={"help": "Attention implementation to use."},
+        metadata={"help": "Attention implementation to use. 'tropical' uses min-plus attention via LogSumExp identity."},
+    )
+    tau: float = field(
+        default=0.1,
+        metadata={"help": "Temperature for tropical attention (lower = sharper min-plus, 0.01 ≈ hard-min)."},
     )
     moe_implementation: Optional[Literal[None, "eager", "fused"]] = field(
         default=None,
@@ -249,6 +253,30 @@ class TrainingArguments:
     repr_align_wt: float = field(
         default=0.0,
         metadata={"help": "Weight for representation alignment loss (0 = disabled). Used for MDM training with teacher model."},
+    )
+    anchor_cache_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Directory of precomputed teacher hidden states (produced by "
+                "scripts/precompute_anchor.py). When set, the trainer skips the "
+                "live-teacher deepcopy and loads anchors from disk per batch. "
+                "Repr-Align is realignment, not distillation: the teacher's output "
+                "for a given input is deterministic, so caching is strictly equivalent "
+                "to running the live teacher every step."
+            )
+        },
+    )
+    align_layers: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Comma-separated layer indices to use in the repr_align cosine loss, "
+                "e.g. '6,12,18,24'. Indices are 0=embedding output, 1..N=transformer "
+                "blocks. Default None = align on ALL layers (current behaviour). "
+                "Required if anchor_cache_dir is set (cache holds only the listed layers)."
+            )
+        },
     )
     # ------------------------------------------------------------------
     # Cola DLM (Continuous Latent Diffusion LM, arXiv:2605.06548)

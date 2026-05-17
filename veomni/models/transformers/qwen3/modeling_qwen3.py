@@ -176,6 +176,41 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+def tropical_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    tau: float = 0.1,
+    **kwargs,
+):
+    """
+    Tropical attention implementation via LogSumExp identity:
+    min_k(Q_ik + K_jk) ≈ -τ·log(Σ_k exp(-Q_ik/τ)·exp(-K_jk/τ))
+    """
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    # LogSumExp identity: min_k(Q_ik + K_jk) ≈ -τ·log(Σ_k exp(-Q_ik·s/τ)·exp(-K_jk·s/τ))
+    # where s = scaling (head_dim**-0.5).  C_ij = Σ_k q_exp_ik * k_exp_kj routes through tensor cores.
+    q_exp = torch.exp(-query.float() * scaling / tau)
+    k_exp = torch.exp(-key_states.float() * scaling / tau)
+    C = torch.matmul(q_exp, k_exp.transpose(2, 3))          # (B, H, S_q, S_k)
+    scores = tau * torch.log(C.clamp(min=1e-30))             # tropical similarity (higher = attend more)
+
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        scores = scores + causal_mask                        # additive mask (-inf for future tokens)
+
+    attn_probs = nn.functional.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_output = torch.matmul(attn_probs, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_probs
+
+
 class Qwen3Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -190,16 +225,16 @@ class Qwen3Attention(nn.Module):
         self.is_causal = True
 
         self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size, config.num_attention_heads * self.head_dim, bias=getattr(config, "attention_bias", False)
         )
         self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=getattr(config, "attention_bias", False)
         )
         self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=getattr(config, "attention_bias", False)
         )
         self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=getattr(config, "attention_bias", False)
         )
         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
@@ -237,7 +272,10 @@ class Qwen3Attention(nn.Module):
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
+        if self.config._attn_implementation == "tropical":
+            attention_interface = tropical_attention_forward
+            kwargs["tau"] = getattr(self.config, "tau", 0.1)
+        elif self.config._attn_implementation != "eager":
             if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
                 logger.warning_once(
                     "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
@@ -337,9 +375,17 @@ class Qwen3RotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        if self.rope_type not in ROPE_INIT_FUNCTIONS:
+            # 'default' or unknown: standard RoPE, extract rope_theta from rope_scaling if present
+            head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+            base = getattr(config, "rope_theta", 10000.0)
+            if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+                base = config.rope_scaling.get("rope_theta", base)
+            inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float() / head_dim))
+            self.attention_scaling = 1.0
+        else:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
@@ -774,7 +820,7 @@ class KwargsForCausalLM(FlashAttentionKwargs): ...
 
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
@@ -789,6 +835,10 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
         self.post_init()
         
         self.teacher_model = None
+        # If set, repr_align cosine loss is computed only on these hidden-state
+        # indices (0 = embedding output, 1..N = transformer blocks). Used with
+        # the precomputed-anchor cache path so we don't need all 40 layers.
+        self.align_layers: Optional[list[int]] = None
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -942,18 +992,24 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             # Get all layer representations
             student_hidden_states = outputs.hidden_states
             teacher_hidden_states = teacher_outputs.hidden_states
-            
+
+            # Subset to align_layers if configured (required when using a
+            # CachedTeacher, which only populates those indices).
+            if self.align_layers is not None:
+                student_hidden_states = tuple(student_hidden_states[i] for i in self.align_layers)
+                teacher_hidden_states = tuple(teacher_hidden_states[i] for i in self.align_layers)
+
             loss_mask = (labels != IGNORE_INDEX)  # (L,)
             if loss_mask.any():
-                # h is shape [1, L, D], concatenate all layers in the first dimension and permute to [L, num_layers, D]
+                # h is shape [1, L, D], concatenate selected layers in the first dimension and permute to [L, num_layers, D]
                 student_stacked = torch.cat([h[..., :-1, :] for h in student_hidden_states], dim=0).permute(1, 0, 2)
                 student_stacked = student_stacked[loss_mask]
                 teacher_stacked = torch.cat([h[..., :-1, :] for h in teacher_hidden_states], dim=0).permute(1, 0, 2)
                 teacher_stacked = teacher_stacked[loss_mask]
-                
+
                 # Compute alignment loss
                 repr_align_loss = repr_align_loss_fn(
-                    student_stacked,  
+                    student_stacked,
                     teacher_stacked,
                 )
         
@@ -998,7 +1054,14 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                     loss = loss_fct(self.lm_head.weight, hidden_states, labels)
                     loss_components["ar"] = loss.detach()
             else:
-                raise ValueError("liger kernel is not available for training.")
+                import torch.nn.functional as F
+                # labels was already shifted to (S-1,) at line ~920; shift hidden_states to match
+                logits = self.lm_head(hidden_states[..., :-1, :].contiguous())
+                loss = F.cross_entropy(
+                    logits.view(-1, self.config.vocab_size),
+                    labels.view(-1),
+                    ignore_index=IGNORE_INDEX,
+                )
 
             if get_parallel_state().sp_enabled:
                 num_valid_tokens = (labels != IGNORE_INDEX).sum()

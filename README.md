@@ -286,6 +286,68 @@ api.upload_folder(repo_id=REPO_ID, repo_type="model", folder_path=LOCAL_DIR)
 
 ---
 
+## 🔄 Two Paths to Diffusion: Repr-Align vs. LDLM
+
+Open-dLLM supports **two approaches** for converting an autoregressive LM into a diffusion LM. Which one you choose depends on your compute budget and goals.
+
+### Recommended: Representation Alignment (Light)
+
+**Paper**: [Don't Retrain—Align: Adapting AR LMs to Diffusion LMs via Representation Alignment](https://arxiv.org/html/2605.06885v1)
+
+The key insight: AR models like Qwen already learn strong language representations. You don't need to retrain from scratch — just **preserve** those representations while switching from causal (left-to-right) to bidirectional (any-order) generation.
+
+**How it works**:
+1. Load a pretrained AR model (e.g., Qwen3.6-35B-A3B)
+2. Flip the attention mask from causal → bidirectional (this is the "student")
+3. Keep a frozen copy as the "teacher" (causal attention, clean input)
+4. Train with two losses:
+   - **Masked denoising loss**: Randomly mask tokens → student predicts them using bidirectional context
+   - **Representation alignment loss**: Cosine similarity between student and teacher hidden states at every layer
+
+**Why it's faster**:
+- No new architecture to train — uses the existing model weights directly
+- **3-4× faster convergence** vs. training from scratch (per the paper)
+- Works on tiny datasets (as low as 0.8B tokens)
+- Optional `freeze_layers: "mlp"` gives ~2× throughput with minimal quality loss
+
+**Quick start** (2 GPUs):
+```bash
+export TOKENIZERS_PARALLELISM=false
+
+torchrun --nproc_per_node=2 tasks/train_torch.py \
+  configs/pretrain/qwen2_5_coder_500M.yaml \
+  --data.train_path=/run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl \
+  --model.model_path=Qwen/Qwen3.6-35B-A3B \
+  --train.enable_masking=true \
+  --train.repr_align_wt=1.0 \
+  --train.micro_batch_size=1 \
+  --train.global_batch_size=16 \
+  --train.output_dir=/run/media/johndpope/12TB/open_dllm/checkpoints/35b_a3b_repr_align \
+  --train.save_steps=500
+```
+
+### Alternative: LDLM — Latent Diffusion (Heavy)
+
+**Paper**: [Latent Diffusion Language Models](https://arxiv.org/abs/2605.07933)
+
+Trains **new components from scratch** (Perceiver encoder/decoder + diffusion head) on top of a frozen AR encoder. More expressive but significantly more expensive — requires training 1.39B-6.75B new parameters.
+
+See the full LDLM section below for details.
+
+### Comparison
+
+| | Repr-Align | LDLM |
+|---|---|---|
+| **New parameters** | 0 (reuses AR model) | 1.39B–6.75B |
+| **Training speed** | 3-4× faster | Baseline |
+| **Data needed** | As low as 0.8B tokens | More data beneficial |
+| **Architecture change** | Attention mask only | New Perceiver + DiT head |
+| **When to use** | Default choice for converting existing models | When you need latent-space diffusion |
+
+> **Bottom line**: If you have an off-the-shelf AR model and want diffusion capabilities with minimal compute, use **Repr-Align**. It's already built into the Qwen3.6 model implementations (`modeling_qwen3_5_moe.py`, `modeling_qwen3.py`, `modeling_qwen2.py`).
+
+---
+
 ## 🧬 LDLM: Latent Diffusion Language Model
 
 Open-dLLM supports **LDLM** (Latent Diffusion Language Model, [arXiv:2605.07933](https://arxiv.org/abs/2605.07933)) — a Perceiver-based latent diffusion approach that jointly trains a latent encoder, diffusion model, and decoder on top of a frozen pre-trained LM. The key insight: reshaping the frozen encoder's hidden states into a diffusion-friendly latent space via a trainable Perceiver, yielding latents that are easy to both denoise and decode into tokens.
@@ -400,17 +462,26 @@ CUDA_VISIBLE_DEVICES=0 python tasks/benchmark_ldlm.py
 CUDA_VISIBLE_DEVICES=0 python tasks/benchmark_ldlm_35b.py
 ```
 
-4. **Start training**:
+4. **Start training** (single GPU):
 ```bash
-# 27B
+# 27B — single GPU (encoder on CPU, trainable on GPU 0)
 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 tasks/train_ldlm.py \
   configs/pretrain/qwen3_6_27b_ldlm.yaml
-# 35B-A3B MoE
+# 35B-A3B MoE — single GPU
 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 tasks/train_ldlm.py \
   configs/pretrain/qwen3_6_35b_a3b_ldlm.yaml
 ```
 
-> **GPU Memory**: The frozen encoder runs on CPU (~54GB RAM for 27B, ~22GB for 35B-A3B). Only trainable components run on GPU. The 35B-A3B MoE variant has a smaller hidden dim (2048 vs 5120), making it significantly faster and more memory-efficient — ideal for consumer GPUs.
+5. **Start training** (2 GPUs, e.g. RTX 5090 + RTX 4000):
+```bash
+# 35B-A3B MoE — frozen encoder on GPU 0, trainable components on GPU 1
+torchrun --nproc_per_node=1 tasks/train_ldlm.py \
+  configs/pretrain/qwen3_6_35b_a3b_ldlm.yaml
+```
+
+> **Note**: Use `--nproc_per_node=1` always — the script handles multi-GPU placement internally (encoder on GPU 0 via `device_map="auto"`, trainable Perceiver/diffusion head on GPU 1). Do NOT use `--nproc_per_node=2` or both processes will collide on GPU 1.
+>
+> **GPU Memory**: With 2 GPUs, the frozen encoder runs on GPU 0 (~22GB VRAM for 35B-A3B, ~54GB for 27B) and trainable components run on GPU 1. With 1 GPU, the encoder stays on CPU and only trainable components use GPU VRAM. The 35B-A3B MoE variant has a smaller hidden dim (2048 vs 5120), making it significantly faster and more memory-efficient — ideal for consumer GPUs.
 
 ---
 

@@ -244,6 +244,9 @@ def main():
         moe_implementation=args.model.moe_implementation,
         init_device=args.train.init_device,
         make_teacher=args.train.repr_align_wt > 0,
+        config_kwargs={"tau": getattr(args.model, "tau", 0.1)} if args.model.attn_implementation == "tropical" else None,
+        anchor_cache_dir=getattr(args.train, "anchor_cache_dir", None),
+        align_layers=getattr(args.train, "align_layers", None),
     )
     
     model_config = model.config
