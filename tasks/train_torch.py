@@ -139,7 +139,11 @@ def main():
     
     # Initialize process group with extended timeout to handle long evaluation periods
     # Default timeout is 10 minutes, but evaluation can take 15-30 minutes
-    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=45))
+    if os.getenv("WORLD_SIZE"):
+        dist.init_process_group(backend="nccl", timeout=timedelta(minutes=45))
+    else:
+        # Fallback for single-device/standalone runs
+        dist.init_process_group(backend="gloo", init_method="file:///tmp/rank0", world_size=1, rank=0)
     helper.set_seed(args.train.seed, args.train.enable_full_determinism)
     if args.train.local_rank == 0:
         helper.enable_third_party_logging()

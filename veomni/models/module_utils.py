@@ -401,6 +401,8 @@ def save_model_assets(output_dir: Union[str, "os.PathLike"], model_assets: Seque
 
 
 
+from functools import partial
+
 class GradientCheckpointingLayer(nn.Module):
     """Base class for layers with gradient checkpointing.
 

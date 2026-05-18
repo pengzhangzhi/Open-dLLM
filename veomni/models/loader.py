@@ -167,6 +167,9 @@ class CustomizedModelingLoader(BaseModelLoader):
                 print("make_teacher (live deepcopy)")
                 import copy
                 teacher_model = copy.deepcopy(model)
+                # PATCH: Move teacher to the second GPU (RTX 4000)
+                if torch.cuda.device_count() > 1:
+                    teacher_model = teacher_model.to("cuda:1")
                 teacher_model.eval()
                 for param in teacher_model.parameters():
                     param.requires_grad = False
