@@ -1,0 +1,92 @@
+# Full Repr-Align on Qwen3.6-35B-A3B — ALL 40 transformer layers trainable.
+# DeepSpeed ZeRO-3 + CPU param offload + NVMe optimizer offload.
+#
+# Memory budget (2 ranks on 96 GB MSI box):
+#   Params  : 35 GB/rank on CPU   → 70 GB total  ✓
+#   Optimizer: 70 GB/rank on NVMe → 140 GB total ✓ (1.1 TB NVMe free)
+#   VRAM     : ~few GB/GPU (one layer active at a time)
+#
+# Prerequisites:
+#   sudo apt-get install -y libaio-dev
+#   DS_BUILD_AIO=1 .venv/bin/python -c "from deepspeed.ops.op_builder import AsyncIOBuilder; AsyncIOBuilder().load(verbose=True)"
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0,1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#       torchrun --nproc_per_node=2 \
+#       tasks/train_torch.py configs/pretrain/qwen3_6_35b_a3b_full_repr_align_ds.yaml
+
+model:
+  model_path: /home/johndpope/.cache/huggingface/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/995ad96eacd98c81ed38be0c5b274b04031597b0/
+  attn_implementation: eager
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 100000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 512
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /run/media/johndpope/12TB/open_dllm/checkpoints/qwen3.6-35b-a3b-full-repr-align-ds
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 3
+  ds_offload_optimizer: nvme   # 140 GB optimizer states → NVMe (requires libaio-dev + async_io)
+  ds_offload_param: cpu        # 70 GB params → CPU RAM
+  ds_overlap_comm: true
+  ds_contiguous_gradients: true
+  ds_nvme_path: /home/johndpope/ds_offload
+
+  ulysses_parallel_size: 1
+  expert_parallel_size: 1
+  global_batch_size: 4
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align core — ALL layers
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-35b-a3b
+  align_layers: "10,20,30,40"
+
+  # No layer freezing — train everything
+  freeze_layers: ""
+
+  quantize_frozen: false
+
+  optimizer: anyprecision_adamw
+  lr: 1.0e-5
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cpu
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 200
+  save_hf_weights: false
+  auto_resume: true
+  save_time_interval_minutes: 60
+
+  use_wandb: true
+  wandb_project: open-dllm-smoke
+  wandb_name: qwen3.6-35b-a3b-full-repr-align-ds

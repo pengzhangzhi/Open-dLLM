@@ -1,0 +1,96 @@
+# DeepSpeed ZeRO-3 smoke test on Qwen3-1.7B.
+#
+# Purpose: validate the zero.Init() + meta-tensor patch + load_hf_weights_zero3
+# pipeline on a model that fits comfortably on one GPU. All the same code paths
+# as the 27B/35B run, just tiny enough to iterate in minutes.
+#
+# Prerequisite (anchor cache):
+#   python scripts/precompute_anchor.py \
+#       --model_path Qwen/Qwen3-1.7B \
+#       --data_path /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl \
+#       --output_dir /home/johndpope/ds_offload/anchors/qwen3-1.7b \
+#       --layers 7,14,21,28 \
+#       --max_seq_len 2048 \
+#       --max_examples 1000
+#
+# Launch (single GPU — no ZeRO partitioning benefit, but exercises the same init
+# path that the 2-GPU 27B run will use):
+#   DS_SKIP_CUDA_CHECK=1 CUDA_VISIBLE_DEVICES=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#       torchrun --nproc_per_node=1 \
+#       tasks/train_torch.py configs/pretrain/qwen3_1_7b_repr_align_ds_smoke.yaml
+
+model:
+  model_path: /home/johndpope/.cache/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/
+  attn_implementation: sdpa
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl
+  train_size: 1000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qwen3-1.7b-repr-align-ds-smoke
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 3
+  ds_offload_optimizer: cpu
+  ds_offload_param: cpu
+  ds_overlap_comm: true
+  ds_contiguous_gradients: true
+  ds_nvme_path: /home/johndpope/ds_offload
+
+  ulysses_parallel_size: 1
+  expert_parallel_size: 1
+  global_batch_size: 1
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align core
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3-1.7b
+  align_layers: "7,14,21,28"
+
+  # Train all layers (1.7B is small enough)
+  freeze_layers: ""
+
+  quantize_frozen: false
+
+  optimizer: anyprecision_adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cpu
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 50
+  save_hf_weights: false
+  auto_resume: true
+  save_time_interval_minutes: 60
+
+  use_wandb: true
+  wandb_project: open-dllm-smoke
+  wandb_name: qwen3-1.7b-repr-align-ds-smoke

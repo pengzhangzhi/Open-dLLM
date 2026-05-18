@@ -64,10 +64,13 @@ def init_empty_weights():
     def register_empty_parameter(module: "nn.Module", name: str, param: "nn.Parameter"):
         old_register_parameter(module, name, param)
         if param is not None:
-            param_cls = type(module._parameters[name])
-            kwargs = module._parameters[name].__dict__
-            kwargs["requires_grad"] = param.requires_grad
-            module._parameters[name] = param_cls(module._parameters[name].to("meta"), **kwargs)
+            existing = module._parameters[name]
+            # ZeRO-3 params carry ds_* attributes in __dict__; passing them to
+            # Parameter.__new__() raises TypeError.  Leave them untouched.
+            if hasattr(existing, "ds_param_type"):
+                return
+            param_cls = type(existing)
+            module._parameters[name] = param_cls(existing.to("meta"), requires_grad=param.requires_grad)
 
     try:
         nn.Module.register_parameter = register_empty_parameter

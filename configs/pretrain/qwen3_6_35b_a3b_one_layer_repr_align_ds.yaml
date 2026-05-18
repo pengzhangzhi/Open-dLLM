@@ -3,7 +3,7 @@
 # by offloading optimizer states and parameters to CPU RAM (91 GB).
 #
 # Launch:
-#   CUDA_VISIBLE_DEVICES=0,1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#   DS_SKIP_CUDA_CHECK=1 CUDA_VISIBLE_DEVICES=0,1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 #       torchrun --nproc_per_node=2 \
 #       tasks/train_torch.py configs/pretrain/qwen3_6_35b_a3b_one_layer_repr_align_ds.yaml
 
@@ -27,11 +27,11 @@ train:
   output_dir: /run/media/johndpope/12TB/open_dllm/checkpoints/qwen3.6-35b-a3b-one-layer-repr-align-ds
   data_parallel_mode: deepspeed
   ds_zero_stage: 3
-  ds_offload_optimizer: cpu
+  ds_offload_optimizer: nvme   # optimizer states on NVMe; requires libaio-dev + async_io build
   ds_offload_param: cpu
   ds_overlap_comm: true
   ds_contiguous_gradients: true
-  # ds_nvme_path: /run/media/johndpope/12TB/open_dllm/ds_offload  # uncomment for NVMe offload (P2)
+  ds_nvme_path: /home/johndpope/ds_offload
   # ds_config_path: ""  # bring-your-own DeepSpeed JSON
 
   ulysses_parallel_size: 1
@@ -72,7 +72,7 @@ train:
   enable_full_shard: false
   enable_fsdp_offload: false
   enable_activation_offload: false
-  init_device: meta                # meta-init → weights loaded distributed in build_parallelize_model
+  init_device: cpu                 # cpu-init inside zero.Init() context; weights loaded post-DS-init
   enable_full_determinism: false
   empty_cache_steps: 50
 

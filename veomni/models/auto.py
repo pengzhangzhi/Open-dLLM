@@ -91,12 +91,15 @@ def build_foundation_model(
     }
 
     _is_deepspeed = get_parallel_state().dp_mode == "deepspeed"
-    if (init_device == "cpu" and get_parallel_state().global_rank != 0 and not _is_deepspeed) or init_device == "meta":
+    if init_device == "meta" or (init_device == "cpu" and (_is_deepspeed or get_parallel_state().global_rank != 0)):
+        # DeepSpeed: model is created inside zero.Init() context with empty CPU tensors;
+        # zero.Init() partitions each param on-the-fly. Weights are loaded after
+        # deepspeed.initialize() via load_hf_weights_zero3().
         empty_init = True
     else:
         empty_init = False
     if _is_deepspeed and weights_path is not None:
-        logger.info_rank0("DeepSpeed mode: every rank loads full weights on CPU.")
+        logger.info_rank0("DeepSpeed mode: model created inside zero.Init() context; weights loaded post-init.")
 
     model = loader.load_model(
         init_kwargs=init_kwargs,

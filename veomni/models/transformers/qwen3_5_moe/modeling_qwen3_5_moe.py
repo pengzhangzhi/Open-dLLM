@@ -699,6 +699,20 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin):
         return result
 
 
-ModelClass = Qwen3_5MoeForCausalLM
+# The HF model snapshot for Qwen3.6-35B-A3B declares
+# architectures=['Qwen3_5MoeForConditionalGeneration'] but for text-only
+# Repr-Align training we want our bidirectional CausalLM.  This alias lets the
+# veomni registry intercept the ConditionalGeneration arch name and route it to
+# our text-only class, which simply ignores the vision weights in the checkpoint.
+class Qwen3_5MoeForConditionalGeneration(Qwen3_5MoeForCausalLM):
+    pass
 
-__all__ = ["Qwen3_5MoeForCausalLM", "Qwen3_5MoeModel", "Qwen3_5MoePreTrainedModel"]
+
+ModelClass = [Qwen3_5MoeForCausalLM, Qwen3_5MoeForConditionalGeneration]
+
+__all__ = [
+    "Qwen3_5MoeForCausalLM",
+    "Qwen3_5MoeForConditionalGeneration",
+    "Qwen3_5MoeModel",
+    "Qwen3_5MoePreTrainedModel",
+]

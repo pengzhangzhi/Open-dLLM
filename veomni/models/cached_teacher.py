@@ -32,9 +32,11 @@ from ..utils.seqlen_pos_transform_utils import pos2culen
 
 class _CachedTeacherOutput:
     """Minimal stand-in for `BaseModelOutputWithPast` — only the attrs that
-    `modeling_qwen3.py` reads from teacher outputs."""
+    `modeling_qwen3.py` reads from teacher outputs.
 
-    __slots__ = ("hidden_states", "loss")
+    No __slots__: DeepSpeed ZeRO-3 forward hooks call vars(output) on nn.Module
+    outputs; __slots__ removes __dict__ and would raise TypeError there.
+    """
 
     def __init__(self, hidden_states: tuple, loss: Optional[torch.Tensor] = None):
         self.hidden_states = hidden_states

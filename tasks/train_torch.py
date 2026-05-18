@@ -266,6 +266,26 @@ def main():
         raise NotImplementedError(f"Unsupported dataloader type: {args.data.dataloader_type}.")
 
     logger.info_rank0("Prepare model")
+    # Enter ZeRO-3 Init context BEFORE model creation so DeepSpeed partitions each
+    # param on-the-fly during __init__.  Peak RAM per rank = 1/N of total params
+    # instead of the full model on every rank.  The context is exited after all
+    # model params have been registered (before build_parallelize_model).
+    # patch_deepspeed_zero_init_for_meta_tensors() is applied first to handle the
+    # meta tensors created by accelerate's init_empty_weights() inside the loader.
+    _ds_zero_ctx = None
+    if args.train.data_parallel_mode == "deepspeed" and args.train.init_device in ("meta", "cpu"):
+        import deepspeed as _ds_import
+        from veomni.distributed.deepspeed_init import (
+            build_ds_config as _build_ds_config_early,
+            patch_deepspeed_zero_init_for_meta_tensors as _patch_ds_meta,
+        )
+        _patch_ds_meta()
+        _ds_zero_ctx = _ds_import.zero.Init(
+            config_dict_or_path=_build_ds_config_early(args.train),
+            remote_device="cpu",
+        )
+        _ds_zero_ctx.__enter__()
+
     time.sleep(args.train.global_rank * 2)
     model = build_foundation_model(
         config_path=args.model.config_path,
@@ -338,6 +358,11 @@ def main():
             cola_detach_student=args.train.cola_detach_student,
         )
 
+    # Exit zero.Init() context: all params now ZeRO-3 partitioned, no more new params expected.
+    if _ds_zero_ctx is not None:
+        _ds_zero_ctx.__exit__(None, None, None)
+        _ds_zero_ctx = None
+
     get_optimizer_pre_hook = getattr(model, "get_optimizer_pre_hook", None)
     model = build_parallelize_model(
         model,
@@ -386,6 +411,14 @@ def main():
             model, optimizer, lr_scheduler, args.train, ds_config
         )
         model = ds_engine
+
+        # Load actual HF weights into the ZeRO-3 partitioned model one shard at a time.
+        # Only rank 0 reads each file; GatheredParameters scatters to all ranks.
+        # Peak RAM ≈ one shard file instead of the full 70 GB.
+        if args.train.init_device in ("meta", "cpu"):
+            from veomni.distributed.deepspeed_init import load_hf_weights_zero3
+            logger.info_rank0(f"Loading HF weights into ZeRO-3 model from {args.model.model_path}")
+            load_hf_weights_zero3(ds_engine.module, args.model.model_path)
 
     if args.train.global_rank == 0:
         if args.train.use_wandb:
