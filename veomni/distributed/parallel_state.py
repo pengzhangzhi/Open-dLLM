@@ -59,7 +59,7 @@ class ParallelState:
     pp_size: int = 1
     cp_size: int = 1
     ulysses_size: int = 1
-    dp_mode: Literal["ddp", "fsdp1", "fsdp2"] = "fsdp1"
+    dp_mode: Literal["ddp", "deepspeed", "fsdp1", "fsdp2"] = "fsdp1"
     device_type: str = "cuda"
     include_sp_in_fsdp: bool = True
     device_mesh: Optional["DeviceMesh"] = None
@@ -125,6 +125,9 @@ class ParallelState:
     # ------------------------------ DP ------------------------------ #
     @property
     def dp_group(self) -> Optional["ProcessGroup"]:
+        if self.dp_mode == "deepspeed":
+            return dist.group.WORLD
+
         if self.sp_device_mesh is not None:
             return self.sp_device_mesh.get_group("dp")
 
@@ -337,16 +340,35 @@ def init_parallel_state(
     pp_size: int,
     cp_size: int,
     ulysses_size: int,
-    dp_mode: Literal["ddp", "fsdp1", "fsdp2"],
+    dp_mode: Literal["ddp", "deepspeed", "fsdp1", "fsdp2"],
     device_type: str = "cuda",
     include_sp_in_fsdp: bool = True,
 ) -> None:
-    """
-    Initializes global parallel state.
-    """
+    """Initializes global parallel state."""
     global _PARALLEL_STATE
     if _PARALLEL_STATE is not None:
         logger.warning("Parallel state has already been initialized.")
+        return
+
+    if dp_mode == "deepspeed":
+        logger.info_rank0(
+            f"DeepSpeed mode: skipping DeviceMesh. dp_size={dp_size}"
+        )
+        _PARALLEL_STATE = ParallelState(
+            dp_size=dp_size,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            pp_size=pp_size,
+            cp_size=cp_size,
+            ulysses_size=ulysses_size,
+            dp_mode="deepspeed",
+            device_type=device_type,
+            include_sp_in_fsdp=include_sp_in_fsdp,
+            device_mesh=None,
+            sp_device_mesh=None,
+            usp_device_mesh=None,
+            ep_device_mesh=None,
+        )
         return
 
     device_mesh, sp_device_mesh, usp_device_mesh, ep_device_mesh = None, None, None, None

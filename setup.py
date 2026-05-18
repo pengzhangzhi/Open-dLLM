@@ -47,7 +47,10 @@ CUDA_REQUIRE = ["liger-kernel>=0.4.1,<1.0"]
 
 NPU_REQUIRE = ["torchvision>=0.16.0,<0.16.1"]
 
-EXTRAS_REQUIRE = {"dev": ["pre-commit>=4.0.0,<5.0", "ruff>=0.7.0,<1.0", "pytest>=6.0.0,<8.0", "expecttest>=0.3.0"]}
+EXTRAS_REQUIRE = {
+    "dev": ["pre-commit>=4.0.0,<5.0", "ruff>=0.7.0,<1.0", "pytest>=6.0.0,<8.0", "expecttest>=0.3.0"],
+    "deepspeed": ["deepspeed>=0.15.0"],
+}
 
 BASE_REQUIRE = [
     "byted-hdfs-io",

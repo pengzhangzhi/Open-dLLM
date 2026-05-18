@@ -17,7 +17,7 @@ import json
 import math
 import os
 from collections import defaultdict
-from typing import Callable, Dict, Union
+from typing import Callable, Dict, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -33,8 +33,21 @@ logger = logging.get_logger(__name__)
 
 
 def parallel_load_safetensors(
-    filepath: str, specific_param_name: list[str] = None, ignore_param_name: list[str] = None
+    filepath: str,
+    specific_param_name: list[str] = None,
+    ignore_param_name: list[str] = None,
+    device: Optional[str] = None,
 ):
+    """
+    Load sharded safetensors in parallel across ranks.
+
+    Args:
+        device: where to materialize each rank's shards. Defaults to the
+            current CUDA device. Pass "cpu" for models whose per-rank shard
+            wouldn't fit in VRAM (e.g. 70 GB MoE on a 24 GB card under FSDP
+            uniform sharding). The downstream broadcast in
+            parallel_init_fsdp_fn moves data to GPU transiently per param.
+    """
     assert not (specific_param_name is not None and ignore_param_name is not None)
 
     safetensors2param = {}
@@ -65,12 +78,12 @@ def parallel_load_safetensors(
     ckpt_chunks = [ckpt_chunks[i * size : (i + 1) * size] for i in range(world_size)]
 
     shard_states = {}
-    device = torch.cuda.current_device()
+    load_device = device if device is not None else torch.cuda.current_device()
     for rank, files in enumerate(ckpt_chunks):
         if rank == dist.get_rank():
             for file in files:
                 safetensors_file = os.path.join(filepath, file)
-                states = load_file(safetensors_file, device=device)
+                states = load_file(safetensors_file, device=load_device)
                 valid_states = {k: v for k, v in states.items() if k in safetensors2param[file]}
                 shard_states.update(valid_states)
                 del states
@@ -193,11 +206,17 @@ def parallel_init_fsdp_fn(
                 shard_states[param_name] = 0
         loaded = shard_states[param_name]
         if isinstance(loaded, (torch.nn.Parameter, torch.Tensor)):
-            dist.broadcast(loaded.data.to(param.dtype), src=dist.get_rank())
+            # Move to param.device (GPU) for the NCCL collective; NCCL refuses
+            # CPU tensors. The transient is per-param so memory stays bounded
+            # even when shard_states was loaded with device="cpu" for a model
+            # that wouldn't fit on a single GPU.
+            bcast_tensor = loaded.data.to(device=param.device, dtype=param.dtype)
+            dist.broadcast(bcast_tensor, src=dist.get_rank())
             if hasattr(state, "spec_info"):
-                copy_to_local(param, loaded.data, state.spec_info)
+                copy_to_local(param, bcast_tensor, state.spec_info)
             else:
-                param.data.copy_(loaded.data)
+                param.data.copy_(bcast_tensor)
+            del bcast_tensor
         else:
             assert isinstance(loaded, int)  # the rank that holds the state
             if hasattr(state, "spec_info"):

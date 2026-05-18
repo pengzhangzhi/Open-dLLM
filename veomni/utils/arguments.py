@@ -415,9 +415,37 @@ class TrainingArguments:
         default=500,
         metadata={"help": "Number of steps between two empty cache operations."},
     )
-    data_parallel_mode: Literal["ddp", "fsdp1", "fsdp2", "fsdp2-vescale"] = field(
+    data_parallel_mode: Literal["ddp", "deepspeed", "fsdp1", "fsdp2", "fsdp2-vescale"] = field(
         default="ddp",
         metadata={"help": "Data parallel mode."},
+    )
+    ds_zero_stage: Literal[1, 2, 3] = field(
+        default=3,
+        metadata={"help": "DeepSpeed ZeRO optimization stage (1, 2, or 3). Only used when data_parallel_mode=deepspeed."},
+    )
+    ds_offload_optimizer: Optional[Literal["cpu", "nvme"]] = field(
+        default=None,
+        metadata={"help": "Offload optimizer state to 'cpu' or 'nvme'. None = no offload."},
+    )
+    ds_offload_param: Optional[Literal["cpu", "nvme"]] = field(
+        default=None,
+        metadata={"help": "Offload parameters to 'cpu' or 'nvme' (ZeRO-3 only). None = no offload."},
+    )
+    ds_nvme_path: str = field(
+        default="",
+        metadata={"help": "Directory path for NVMe offload. Required when offload to 'nvme'."},
+    )
+    ds_overlap_comm: bool = field(
+        default=True,
+        metadata={"help": "Overlap communication with computation in DeepSpeed ZeRO."},
+    )
+    ds_contiguous_gradients: bool = field(
+        default=True,
+        metadata={"help": "Use contiguous gradient buffers in DeepSpeed ZeRO."},
+    )
+    ds_config_path: str = field(
+        default="",
+        metadata={"help": "Path to a custom DeepSpeed JSON config. Overrides all ds_* fields."},
     )
     tensor_parallel_size: int = field(
         default=1,
@@ -588,6 +616,25 @@ class TrainingArguments:
 
         if self.gradient_accumulation_steps > 1 and self.enable_fsdp_offload:
             raise ValueError("Gradient accumulation is not supported with FSDP offload.")
+
+        # ── DeepSpeed validation ──
+        if self.data_parallel_mode == "deepspeed":
+            if self.ds_zero_stage not in (1, 2, 3):
+                raise ValueError(f"ds_zero_stage must be 1, 2, or 3, got {self.ds_zero_stage}.")
+            if self.ds_offload_param is not None and self.ds_zero_stage != 3:
+                raise ValueError(
+                    f"ds_offload_param={self.ds_offload_param!r} requires zero_stage=3, got {self.ds_zero_stage}."
+                )
+            if "nvme" in (str(self.ds_offload_optimizer or ""), str(self.ds_offload_param or "")):
+                if not self.ds_nvme_path or not os.path.isdir(self.ds_nvme_path):
+                    raise ValueError(
+                        f"NVMe offload requires a valid ds_nvme_path directory, got: '{self.ds_nvme_path}'."
+                    )
+            if self.init_device != "cpu":
+                logger.info_rank0(
+                    f"Forcing init_device='cpu' for DeepSpeed mode (was '{self.init_device}')."
+                )
+                object.__setattr__(self, "init_device", "cpu")
 
         self.dataloader_batch_size = self.global_batch_size // self.data_parallel_size  # = micro bsz * grad accu
 

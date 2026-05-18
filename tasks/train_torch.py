@@ -375,6 +375,18 @@ def main():
         lr_start=args.train.lr_start,
     )
 
+    # ── DeepSpeed engine init (must happen after optimizer + lr_scheduler) ──
+    ds_engine = None
+    if args.train.data_parallel_mode == "deepspeed":
+        from veomni.distributed.deepspeed_init import build_ds_config, init_deepspeed_engine
+
+        ds_config = build_ds_config(args.train)
+        logger.info_rank0(f"DeepSpeed config: {json.dumps(ds_config, indent=2)}")
+        ds_engine, optimizer, lr_scheduler = init_deepspeed_engine(
+            model, optimizer, lr_scheduler, args.train, ds_config
+        )
+        model = ds_engine
+
     if args.train.global_rank == 0:
         if args.train.use_wandb:
             wandb.init(
@@ -483,28 +495,35 @@ def main():
                         step_loss_components[name] = step_loss_components.get(name, 0.0) + value / len(micro_batches)
 
                 with model_bwd_context:
-                    loss_tensor.backward()
+                    if ds_engine is not None:
+                        ds_engine.backward(loss_tensor)
+                    else:
+                        loss_tensor.backward()
 
                 total_loss += loss_tensor.item()
                 del micro_batch
 
-            if args.train.data_parallel_mode == "fsdp1":
+            if ds_engine is not None:
+                # DeepSpeed handles gradient clipping + opt step + zero_grad internally
+                ds_engine.step()
+                grad_norm = ds_engine.get_global_grad_norm()
+            elif args.train.data_parallel_mode == "fsdp1":
                 grad_norm = model.clip_grad_norm_(args.train.max_grad_norm).item()
             else:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.train.max_grad_norm, foreach=True)
-
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
             if hasattr(grad_norm, "full_tensor"):
                 grad_norm = grad_norm.full_tensor().item()
 
             # collect mean loss across data parallel group
-            total_loss, grad_norm = all_reduce((total_loss, grad_norm), group=get_parallel_state().fsdp_group)
+            reduce_group = dist.group.WORLD if ds_engine is not None else get_parallel_state().fsdp_group
+            total_loss, grad_norm = all_reduce((total_loss, grad_norm), group=reduce_group)
             if step_loss_components:
                 names = sorted(step_loss_components.keys())
                 values = tuple(step_loss_components[name] for name in names)
-                reduced_values = all_reduce(values, group=get_parallel_state().fsdp_group)
+                reduced_values = all_reduce(values, group=reduce_group)
                 step_loss_components = {name: value for name, value in zip(names, reduced_values)}
             torch.cuda.synchronize()
             delta_time = time.time() - start_time

@@ -73,6 +73,17 @@ def main() -> None:
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16"])
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--device_map", default=None, help="HF device_map, e.g. 'auto' for big teachers")
+    ap.add_argument(
+        "--max_memory",
+        default=None,
+        help=(
+            "JSON dict for HF accelerate per-device caps, e.g. "
+            "'{\"0\":\"28GB\",\"1\":\"18GB\",\"cpu\":\"60GB\"}'. "
+            "Use with --device_map auto to leave headroom for layer swap-in "
+            "during forward; avoids the OOM when accelerate tries to page a "
+            "CPU-resident layer onto a near-full GPU."
+        ),
+    )
     args = ap.parse_args()
 
     layers = sorted({int(x) for x in args.layers.split(",")})
@@ -90,6 +101,10 @@ def main() -> None:
     model_kwargs = dict(torch_dtype=dtype, trust_remote_code=True)
     if args.device_map:
         model_kwargs["device_map"] = args.device_map
+    if args.max_memory:
+        # accelerate wants int keys for GPU/XPU device ids ("cpu" / "disk" stay strings).
+        raw = json.loads(args.max_memory)
+        model_kwargs["max_memory"] = {int(k) if k.isdigit() else k: v for k, v in raw.items()}
     model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_kwargs)
     if not args.device_map:
         model = model.to(args.device)
