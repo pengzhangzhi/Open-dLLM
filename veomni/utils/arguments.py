@@ -630,11 +630,11 @@ class TrainingArguments:
                     raise ValueError(
                         f"NVMe offload requires a valid ds_nvme_path directory, got: '{self.ds_nvme_path}'."
                     )
-            if self.init_device != "cpu":
+            if self.init_device not in ("cpu", "meta"):
                 logger.info_rank0(
-                    f"Forcing init_device='cpu' for DeepSpeed mode (was '{self.init_device}')."
+                    f"Forcing init_device='meta' for DeepSpeed mode (was '{self.init_device}')."
                 )
-                object.__setattr__(self, "init_device", "cpu")
+                object.__setattr__(self, "init_device", "meta")
 
         self.dataloader_batch_size = self.global_batch_size // self.data_parallel_size  # = micro bsz * grad accu
 

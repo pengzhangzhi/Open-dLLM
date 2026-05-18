@@ -17,6 +17,7 @@ from functools import partial
 from typing import Any, Dict, List, Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.fsdp import CPUOffload, FullyShardedDataParallel, MixedPrecision, ShardingStrategy
 from torch.distributed.fsdp._runtime_utils import _lazy_init
@@ -114,7 +115,71 @@ def build_parallelize_model(
 
     if parallel_state.dp_mode == "deepspeed":
         logger.info_rank0("DeepSpeed mode: skipping FSDP/DDP wrapping. Engine init deferred to trainer.")
-        # Gradient checkpointing and TP/EP still apply before DS init
+
+        # ── Weight loading for meta/cpu init (distributed, avoids each rank loading full 70 GB) ──
+        init_device = kwargs.get("init_device", "cuda")
+        weights_path = kwargs.get("weights_path", None)
+        if init_device in ("meta", "cpu") and weights_path is not None:
+            kwargs.pop("weights_path", None)
+            from .initialize import parallel_load_safetensors
+            from .utils import get_module_from_path
+
+            logger.info_rank0(f"DeepSpeed: loading weights distributed to CPU from {weights_path}")
+            shard_states = parallel_load_safetensors(weights_path, device="cpu")
+
+            # Materialize each meta parameter on CPU by broadcasting from the
+            # rank that loaded that shard. Each rank only held ~half the shards
+            # in CPU RAM; after broadcast every rank has the full model on CPU.
+            # DeepSpeed ZeRO-3 then manages GPU residency during engine init.
+            for name, param in list(model.named_parameters()):
+                if param.device.type != "meta":
+                    continue
+                loaded = shard_states.get(name, None)
+                if loaded is not None and isinstance(loaded, (torch.Tensor, torch.nn.Parameter)):
+                    bcast = loaded.data.to(device="cpu", dtype=param.dtype)
+                    dist.broadcast(bcast, src=dist.get_rank())
+                    new_param = torch.nn.Parameter(bcast, requires_grad=param.requires_grad)
+                else:
+                    if dist.get_rank() == 0:
+                        new_param = torch.nn.Parameter(
+                            torch.randn(param.shape, dtype=param.dtype, device="cpu"),
+                            requires_grad=param.requires_grad,
+                        )
+                    else:
+                        new_param = torch.nn.Parameter(
+                            torch.empty(param.shape, dtype=param.dtype, device="cpu"),
+                            requires_grad=param.requires_grad,
+                        )
+                    dist.broadcast(new_param.data, src=0)
+                # Replace the parameter in-place
+                parent_path, _, attr = name.rpartition(".")
+                if parent_path:
+                    parent_mod = get_module_from_path(model, parent_path)
+                else:
+                    parent_mod = model
+                parent_mod._parameters[attr] = new_param
+
+            # Same for buffers
+            for name, buf in list(model.named_buffers()):
+                if buf.device.type != "meta":
+                    continue
+                loaded = shard_states.get(name, None)
+                if loaded is not None and isinstance(loaded, (torch.Tensor, torch.nn.Parameter)):
+                    bcast = loaded.data.to(device="cpu", dtype=buf.dtype)
+                    dist.broadcast(bcast, src=dist.get_rank())
+                    new_buf = bcast.clone()
+                else:
+                    new_buf = torch.empty(buf.shape, dtype=buf.dtype, device="cpu")
+                    dist.broadcast(new_buf, src=0)
+                parent_path, _, attr = name.rpartition(".")
+                if parent_path:
+                    parent_mod = get_module_from_path(model, parent_path)
+                else:
+                    parent_mod = model
+                parent_mod._buffers[attr] = new_buf
+
+            torch.cuda.empty_cache()
+
         return model
 
     if parallel_state.fsdp_enabled:

@@ -90,10 +90,13 @@ def build_foundation_model(
         "trust_remote_code": True,
     }
 
-    if (init_device == "cpu" and get_parallel_state().global_rank != 0) or init_device == "meta":
+    _is_deepspeed = get_parallel_state().dp_mode == "deepspeed"
+    if (init_device == "cpu" and get_parallel_state().global_rank != 0 and not _is_deepspeed) or init_device == "meta":
         empty_init = True
     else:
         empty_init = False
+    if _is_deepspeed and weights_path is not None:
+        logger.info_rank0("DeepSpeed mode: every rank loads full weights on CPU.")
 
     model = loader.load_model(
         init_kwargs=init_kwargs,
