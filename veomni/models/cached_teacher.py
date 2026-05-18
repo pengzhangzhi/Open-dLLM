@@ -7,12 +7,15 @@ path via `copy.deepcopy(model)`) is pure waste.
 
 `CachedTeacher` reads anchor tensors pre-computed by `scripts/precompute_anchor.py`
 and surfaces them via the same interface that `modeling_qwen3.py` already calls
-on `self.teacher_model` — namely `forward(input_ids, ...)` returning an object
-with `.hidden_states` (a tuple indexed by layer) and `.loss`.
+on `self.teacher_model` — namely `forward(input_ids, position_ids, ...)` returning
+an object with `.hidden_states` (a tuple indexed by layer) and `.loss`.
 
-Only the layer indices listed in the cache manifest are populated; other entries
-in the tuple are `None`. `modeling_qwen3.py` must subset to `align_layers` before
-stacking, which it does when `align_layers` is set on the model.
+The trainer packs multiple short chunks into a single row via rmpad, with
+`position_ids` resetting at each chunk boundary. The cache is keyed per-chunk
+(each precomputed example is one unpadded chunk), so this module uses
+`position_ids` to split the incoming packed row into chunks, hashes and looks
+up each chunk, then stitches the hidden states back into a packed
+[1, total_len, D] tensor that matches the student's layout.
 """
 
 import hashlib
@@ -23,6 +26,8 @@ from typing import Optional
 import torch
 from safetensors.torch import safe_open
 from torch import nn
+
+from ..utils.seqlen_pos_transform_utils import pos2culen
 
 
 class _CachedTeacherOutput:
@@ -36,8 +41,8 @@ class _CachedTeacherOutput:
         self.loss = loss
 
 
-def _hash_row(input_ids_row: torch.Tensor) -> str:
-    return hashlib.sha256(input_ids_row.cpu().numpy().tobytes()).hexdigest()[:16]
+def _hash_chunk(input_ids_chunk: torch.Tensor) -> str:
+    return hashlib.sha256(input_ids_chunk.cpu().numpy().tobytes()).hexdigest()[:16]
 
 
 class CachedTeacher(nn.Module):
@@ -52,7 +57,6 @@ class CachedTeacher(nn.Module):
             )
         with open(manifest_path) as f:
             self.manifest = json.load(f)
-        # Sanity-check the cache matches the student we're plugging it into.
         if self.manifest["num_hidden_layers"] != num_hidden_layers:
             raise ValueError(
                 f"Anchor cache has num_hidden_layers={self.manifest['num_hidden_layers']} "
@@ -71,37 +75,78 @@ class CachedTeacher(nn.Module):
     def _shard_path(self, h: str) -> Path:
         return self.cache_dir / h[:2] / f"{h}.safetensors"
 
-    def forward(self, input_ids: torch.Tensor, **kwargs):
+    def _load_chunk(self, h: str, chunk: Optional[torch.Tensor] = None) -> dict[int, torch.Tensor]:
+        p = self._shard_path(h)
+        if not p.exists():
+            preview = chunk[:16].tolist() if chunk is not None else None
+            raise KeyError(
+                f"Anchor cache miss for hash {h}. Path: {p}. "
+                f"chunk_len={None if chunk is None else chunk.numel()} first16_ids={preview}"
+            )
+        out: dict[int, torch.Tensor] = {}
+        with safe_open(str(p), framework="pt") as f:
+            for li in self.cached_layers:
+                out[li] = f.get_tensor(f"hidden_layer_{li}")
+        return out
+
+    def forward(self, input_ids: torch.Tensor, position_ids: Optional[torch.Tensor] = None, **kwargs):
         """Return a mock CausalLMOutputWithPast-like object with sparse
-        `hidden_states` populated only at indices in `self.cached_layers`."""
+        `hidden_states` populated only at indices in `self.cached_layers`.
+
+        Splits the packed `input_ids` into chunks using `position_ids` (whose
+        zeros mark chunk starts), hashes each chunk, looks up its cached
+        hidden states, and concatenates them back to match the student layout.
+        """
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
-        bsz = input_ids.size(0)
+        if position_ids is None:
+            raise ValueError(
+                "CachedTeacher requires position_ids to split packed rmpad rows into chunks."
+            )
+        if position_ids.dim() == 1:
+            position_ids = position_ids.unsqueeze(0)
+
+        bsz, seq_len = input_ids.shape
         device = input_ids.device
 
-        # Gather per-row, per-layer tensors from disk.
-        per_layer_rows: dict[int, list[torch.Tensor]] = {li: [] for li in self.cached_layers}
-        for b in range(bsz):
-            h = _hash_row(input_ids[b])
-            p = self._shard_path(h)
-            if not p.exists():
-                raise KeyError(
-                    f"Anchor cache miss for hash {h} (row {b} of batch). "
-                    f"Was this example included in the precompute run? Path: {p}"
+        # rmpad collator yields bsz=1 with all chunks packed along seq dim.
+        # Anything else would mean per-row padding, which this cache doesn't model.
+        if bsz != 1:
+            raise ValueError(
+                f"CachedTeacher only supports bsz=1 packed rows, got bsz={bsz}. "
+                "If you need padded multi-row batches, change the data pipeline or "
+                "use the live teacher path."
+            )
+
+        # cu_seqlens = [0, len_0, len_0+len_1, ..., seq_len]
+        cu_seqlens = pos2culen(position_ids).tolist()
+
+        per_layer_slices: dict[int, list[torch.Tensor]] = {li: [] for li in self.cached_layers}
+        for i in range(len(cu_seqlens) - 1):
+            s, e = cu_seqlens[i], cu_seqlens[i + 1]
+            chunk = input_ids[0, s:e]
+            h = _hash_chunk(chunk)
+            chunk_layers = self._load_chunk(h, chunk=chunk)
+            for li in self.cached_layers:
+                t = chunk_layers[li]
+                if t.size(0) != (e - s):
+                    raise ValueError(
+                        f"Cached chunk for hash {h} has length {t.size(0)} but "
+                        f"packed row slice expects {e - s}."
+                    )
+                per_layer_slices[li].append(t)
+
+        # Concatenate along seq dim to rebuild a packed [1, seq_len, D] tensor.
+        stacked: dict[int, torch.Tensor] = {}
+        for li in self.cached_layers:
+            cat = torch.cat(per_layer_slices[li], dim=0).unsqueeze(0).to(device=device)
+            if cat.size(1) != seq_len:
+                raise ValueError(
+                    f"Reconstructed cached layer {li} has length {cat.size(1)} "
+                    f"but packed row is {seq_len}."
                 )
-            with safe_open(str(p), framework="pt") as f:
-                for li in self.cached_layers:
-                    per_layer_rows[li].append(f.get_tensor(f"hidden_layer_{li}"))
+            stacked[li] = cat
 
-        # Stack to [B, S, D] per layer, move to model device.
-        stacked = {
-            li: torch.stack(per_layer_rows[li], dim=0).to(device=device)
-            for li in self.cached_layers
-        }
-
-        # Build the full-length tuple, putting cached tensors at the right
-        # indices and None elsewhere. modeling_qwen3.py with align_layers set
-        # will only touch the cached indices.
         hidden_states = tuple(
             stacked[li] if li in stacked else None for li in range(self._tuple_len)
         )

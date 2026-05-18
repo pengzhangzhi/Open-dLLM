@@ -26,14 +26,14 @@
 
 model:
   model_path: Qwen/Qwen3-1.7B
-  attn_implementation: flash_attention_2
+  attn_implementation: sdpa
 
 data:
-  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl  # 1000-line slice; matches precompute
   train_size: 1000               # smoke test — match precompute --max_examples
   dataloader_type: native
   data_type: plaintext
-  max_seq_len: 2048              # must match precompute --max_seq_len
+  max_seq_len: 2048             # must match precompute_anchor.py --max_seq_len
   text_keys: text
   drop_last: true
   datasets_type: mapping
@@ -47,7 +47,7 @@ train:
   global_batch_size: 8
   micro_batch_size: 1
   rmpad: false
-  rmpad_with_pos_ids: true       # required by enable_masking path
+  rmpad_with_pos_ids: true
   bsz_warmup_ratio: 0.0
   dyn_bsz_margin: 0
   dyn_bsz_buffer_size: 50
@@ -62,7 +62,7 @@ train:
   freeze_layers: ""
 
   # Optimisation
-  optimizer: adamw
+  optimizer: anyprecision_adamw
   lr: 1.0e-4
   lr_warmup_ratio: 0.01
   lr_decay_style: cosine
@@ -75,7 +75,7 @@ train:
   enable_gradient_checkpointing: true
   enable_full_shard: false        # 1.7B fits on 5090 without sharding
   enable_fsdp_offload: false
-  enable_activation_offload: false
+  enable_activation_offload: true
   init_device: cuda
   enable_full_determinism: false
   empty_cache_steps: 50
