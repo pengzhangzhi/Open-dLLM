@@ -27,8 +27,9 @@ logger = logging.get_logger(__name__)
 class DeepSpeedCheckpointer(CheckpointerBase):
     """Checkpointer that uses DeepSpeed engine.save_checkpoint / load_checkpoint."""
 
+    @classmethod
     def save(
-        self,
+        cls,
         path: str,
         state: Dict[str, Any],
         save_async: Optional[bool] = None,
@@ -43,7 +44,8 @@ class DeepSpeedCheckpointer(CheckpointerBase):
         engine.save_checkpoint(path, tag=tag, client_state=state.get("extra_state", {}))
         logger.info_rank0(f"DeepSpeed checkpoint saved at {path}")
 
-    def load(self, path: str, state: Dict[str, Any], **kwargs):
+    @classmethod
+    def load(cls, path: str, state: Dict[str, Any], **kwargs):
         engine = state["model"]  # In DS mode, model IS the engine
         tag = os.path.basename(path)
 
