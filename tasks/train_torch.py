@@ -122,6 +122,33 @@ def freeze_layers_by_patterns(model, patterns_str, logger):
         logger.warning_rank0(f"No parameters matched patterns: {patterns}")
 
 
+def quantize_frozen_linears(model, dtype: str, logger):
+    """Apply torchao weight-only quantization to fully-frozen nn.Linear modules.
+
+    Targets one-layer / frozen-base training where most of the model is
+    read-only. Quantizing those weights cuts resident VRAM ~2x (int8) or ~4x
+    (int4) at the cost of needing torchao installed and the standard
+    weight-only-int* matmul kernels at forward time. Must run AFTER
+    freeze_layers_by_patterns and BEFORE FSDP wrap.
+    """
+    try:
+        from torchao.quantization import Int4WeightOnlyConfig, Int8WeightOnlyConfig, quantize_
+    except ImportError as e:
+        raise ImportError(
+            "quantize_frozen=true requires torchao. Install with `pip install torchao`."
+        ) from e
+
+    config = Int8WeightOnlyConfig() if dtype == "int8" else Int4WeightOnlyConfig()
+
+    def is_fully_frozen_linear(module, fqn: str) -> bool:
+        if not isinstance(module, torch.nn.Linear):
+            return False
+        # recurse=False: only this module's own params. Linear has weight (+optional bias) only.
+        return all(not p.requires_grad for p in module.parameters(recurse=False))
+
+    n_quantized = sum(1 for m, n in [(m, n) for n, m in model.named_modules()] if is_fully_frozen_linear(m, n))
+    quantize_(model, config, filter_fn=is_fully_frozen_linear)
+    logger.info_rank0(f"Quantized {n_quantized} frozen Linear modules with torchao {dtype} weight-only.")
 
 
 @dataclass
@@ -262,6 +289,13 @@ def main():
     
     # Freeze layers based on patterns
     freeze_layers_by_patterns(model, args.train.freeze_layers, logger)
+
+    # Optional: shrink frozen weights via torchao weight-only quantization.
+    # Must run after freeze_layers_by_patterns (we filter on requires_grad) and
+    # before build_parallelize_model (so FSDP sees the quantized tensors).
+    if args.train.quantize_frozen:
+        quantize_frozen_linears(model, args.train.quantize_frozen_dtype, logger)
+
     helper.print_device_mem_info("VRAM usage after building model")
 
     # ------------------------------------------------------------------

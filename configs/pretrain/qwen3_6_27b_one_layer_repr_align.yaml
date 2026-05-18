@@ -1,0 +1,110 @@
+# Repr-Align on Qwen3.6-27B (dense) with ONLY layer 0 trainable.
+#
+# Goal: validate the Repr-Align pipeline on the real 27B weights using local
+# hardware. FSDP1 shards the model across the MSI's two GPUs (5090 + RTX PRO
+# 4000 Blackwell, 32+24=56 GB). With one transformer block trainable and the
+# anchor cache supplying the teacher, this is the largest Repr-Align run that
+# fits without CPU offload on this box.
+#
+# Why layer 0 (and not the last block):
+#   Repr-Align's loss is the cosine sim between student and teacher hidden
+#   states at `align_layers`. If we only train a layer downstream of all align
+#   points there is no gradient into the trainable block from repr_align — the
+#   only signal is the MDM loss through lm_head. Training layer 0 makes the
+#   trainable weights influence every cached anchor, so repr_align stays a
+#   live signal end-to-end.
+#
+# Prerequisites:
+#   1. Pre-cache anchors (run on the 5090 + RTX PRO 4000 with device_map=auto):
+#      python scripts/precompute_anchor.py \
+#          --model_path Qwen/Qwen3.6-27B \
+#          --data_path /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl \
+#          --output_dir /home/johndpope/ds_offload/anchors/qwen3.6-27b \
+#          --layers 16,32,48,64 \
+#          --max_seq_len 2048 \
+#          --max_examples 1000 \
+#          --device_map auto
+#      Expected cache size: ~80 GB (4 layers × 2048 × 5120 × 2 bytes × 1000).
+#
+#   2. Launch with TWO GPUs:
+#      CUDA_VISIBLE_DEVICES=0,1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#          torchrun --nproc_per_node=2 \
+#          tasks/train_torch.py configs/pretrain/qwen3_6_27b_one_layer_repr_align.yaml
+#
+#   If the run OOMs, flip `enable_fsdp_offload: true` (slower, but recovers
+#   another ~25 GB of activation/grad headroom from CPU offload).
+
+model:
+  model_path: Qwen/Qwen3.6-27B
+  attn_implementation: flash_attention_2
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl
+  train_size: 1000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048             # must match precompute_anchor.py --max_seq_len
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qwen3.6-27b-one-layer-repr-align
+  data_parallel_mode: fsdp1
+  ulysses_parallel_size: 1
+  global_batch_size: 2          # 1 micro-bsz × 2 GPUs, no grad accum
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align core
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-27b
+  align_layers: "16,32,48,64"   # spread across 64 blocks; all downstream of trainable layer 0
+
+  # One-layer training: freeze everything except model.layers.0.* . Substring
+  # match (see freeze_layers_by_patterns in tasks/train_torch.py). The trailing
+  # "." after each layer index prevents "layers.6." matching "layers.60.".
+  freeze_layers: "embed_tokens,lm_head,model.norm,model.layers.1.,model.layers.2.,model.layers.3.,model.layers.4.,model.layers.5.,model.layers.6.,model.layers.7.,model.layers.8.,model.layers.9.,model.layers.10.,model.layers.11.,model.layers.12.,model.layers.13.,model.layers.14.,model.layers.15.,model.layers.16.,model.layers.17.,model.layers.18.,model.layers.19.,model.layers.20.,model.layers.21.,model.layers.22.,model.layers.23.,model.layers.24.,model.layers.25.,model.layers.26.,model.layers.27.,model.layers.28.,model.layers.29.,model.layers.30.,model.layers.31.,model.layers.32.,model.layers.33.,model.layers.34.,model.layers.35.,model.layers.36.,model.layers.37.,model.layers.38.,model.layers.39.,model.layers.40.,model.layers.41.,model.layers.42.,model.layers.43.,model.layers.44.,model.layers.45.,model.layers.46.,model.layers.47.,model.layers.48.,model.layers.49.,model.layers.50.,model.layers.51.,model.layers.52.,model.layers.53.,model.layers.54.,model.layers.55.,model.layers.56.,model.layers.57.,model.layers.58.,model.layers.59.,model.layers.60.,model.layers.61.,model.layers.62.,model.layers.63."
+
+  # Optional: torchao weight-only quantization of frozen Linear modules.
+  # 27B bf16 weights ~= 54 GB; int8 brings that to ~27 GB (fits on the 5090
+  # alone, no FSDP needed if you also drop enable_full_shard to false). Needs
+  # `pip install torchao`. Trainable layer 0 stays in bf16.
+  quantize_frozen: false          # set true to enable
+  quantize_frozen_dtype: int8     # int8 (~/2) or int4 (~/4)
+
+  optimizer: anyprecision_adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: true         # FSDP1 shards across both GPUs
+  enable_fsdp_offload: false      # try without offload first; flip true if OOM
+  enable_activation_offload: false
+  init_device: meta               # lazy-init weights to avoid 54 GB allocation spike
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_hf_weights: false
+  auto_resume: true
+  save_time_interval_minutes: 60
+
+  use_wandb: true
+  wandb_project: open-dllm-smoke
+  wandb_name: qwen3.6-27b-one-layer-repr-align

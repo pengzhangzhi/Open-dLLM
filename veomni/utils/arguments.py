@@ -485,6 +485,14 @@ class TrainingArguments:
         default=None,
         metadata={"help": "Comma-separated layer patterns to freeze (e.g., 'attn,mlp'). Uses case-insensitive substring matching."},
     )
+    quantize_frozen: bool = field(
+        default=False,
+        metadata={"help": "If true, apply torchao weight-only quantization to all Linear modules whose params are entirely frozen. Cuts resident weight VRAM ~2-4x. Requires `pip install torchao`. Applied after freeze_layers, before FSDP wrap."},
+    )
+    quantize_frozen_dtype: Literal["int8", "int4"] = field(
+        default="int8",
+        metadata={"help": "Precision for quantize_frozen. int8 ~halves weight memory with no measurable quality loss; int4 ~quarters it but may hurt convergence on small finetunes."},
+    )
     seed: int = field(
         default=42,
         metadata={"help": "Random seed."},
