@@ -746,7 +746,7 @@ def main():
                 # This prevents timeout when evaluation takes longer than NCCL timeout.
                 logger.info_rank0(f"Checkpoint saved at {save_checkpoint_path} successfully!")
             
-            if save_time:
+            if save_time and args.train.save_optimizer_state:
                 helper.empty_cache()
                 state = {
                     "model": model,

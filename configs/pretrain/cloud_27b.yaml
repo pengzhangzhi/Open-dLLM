@@ -39,7 +39,7 @@ train:
   align_layers: "16,32,48,64"
   freeze_layers: ""
   quantize_frozen: false
-  optimizer: anyprecision_adamw
+  optimizer: adamw
   lr: 1.0e-4
   lr_warmup_ratio: 0.01
   lr_decay_style: cosine
@@ -63,7 +63,7 @@ train:
   save_hf_weights: true
   save_epochs: 0
   auto_resume: true
-  save_time_interval_minutes: 30
+  save_time_interval_minutes: 0
   use_wandb: true
   wandb_project: open-dllm-27b
   wandb_name: repr-align-27b-run3
