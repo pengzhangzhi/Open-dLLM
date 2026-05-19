@@ -11,3 +11,4 @@ torchdata>=0.8.0,<1.0
 transformers[torch]>=4.57.6
 wandb
 flash-linear-attention>=0.2.0
+torchvision  # required by seed_omni; install via: uv sync --extra vision
