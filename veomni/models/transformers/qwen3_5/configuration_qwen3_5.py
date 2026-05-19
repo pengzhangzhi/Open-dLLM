@@ -104,6 +104,10 @@ class Qwen3_5Config(Qwen3Config):
         if hasattr(self, "layer_types") and not isinstance(self.__class__.layer_types, property):
             del self.layer_types
 
+        # Qwen3Config may override head_dim via setter (computes hidden_size // num_heads).
+        # Restore our value so full-attention projections use the correct dimension.
+        object.__setattr__(self, "_head_dim", head_dim)
+
     @property
     def partial_rotary_factor(self) -> float:
         return self._partial_rotary_factor
