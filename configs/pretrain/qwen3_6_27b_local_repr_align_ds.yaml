@@ -1,21 +1,8 @@
 # Local Repr-Align on Qwen3.6-27B — DeepSpeed ZeRO-3 + CPU offload.
 # Optimized for RTX 5090 (32GB) + RTX PRO 4000 Blackwell (24GB).
 #
-# Prerequisites:
-#   Model: /home/johndpope/ds_offload/models/Qwen3.6-27B
-#   Data:  /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl
-#   Anchors precomputed at: /home/johndpope/ds_offload/anchors/qwen3.6-27b/
-#     (layers 16,32,48,64 — if missing, precompute with script below)
-#
-# Precompute anchors (run once):
-#   .venv/bin/python scripts/precompute_anchor.py \
-#       --model_path /home/johndpope/ds_offload/models/Qwen3.6-27B \
-#       --data_path /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl \
-#       --output_dir /home/johndpope/ds_offload/anchors/qwen3.6-27b \
-#       --layers 16,32,48,64 \
-#       --max_seq_len 2048 \
-#       --max_examples 1000 \
-#       --device_map auto
+# Uses CachedTeacher at /home/johndpope/ds_offload/anchors/qwen3.6-27b/
+# covering ~1,000 examples from the full data.jsonl.
 #
 # Launch:
 #   CUDA_VISIBLE_DEVICES=0,1 DS_SKIP_CUDA_CHECK=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -28,7 +15,7 @@ model:
 
 data:
   train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
-  train_size: 100000
+  train_size: 1000
   dataloader_type: native
   data_type: plaintext
   max_seq_len: 2048
@@ -69,8 +56,8 @@ train:
   freeze_layers: ""
   quantize_frozen: false
 
-  # Smoke test — remove or increase for real training
-  max_steps: 200
+  # Real training — remove or set max_steps for limited run
+  max_steps: 10000
 
   optimizer: adamw
   lr: 1.0e-4
