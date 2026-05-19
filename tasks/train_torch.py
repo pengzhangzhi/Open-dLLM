@@ -670,8 +670,12 @@ def main():
                         "torch_rng_state": torch.get_rng_state(),
                     },
                 }
-                Checkpointer.save(save_checkpoint_path, state)
-                logger.info_rank0(f"Checkpoint saved to {save_checkpoint_path}")
+                if args.train.save_optimizer_state:
+                    Checkpointer.save(save_checkpoint_path, state)
+                    logger.info_rank0(f"Checkpoint saved to {save_checkpoint_path}")
+                else:
+                    os.makedirs(save_checkpoint_path, exist_ok=True)
+                    logger.info_rank0(f"Skipping ZeRO checkpoint (save_optimizer_state=False); HF weights only.")
                 if args.train.global_rank == 0 and args.train.save_total_limit > 0:
                     _prune_old_checkpoints(args.train.save_checkpoint_path, args.train.save_total_limit)
 
@@ -775,7 +779,8 @@ def main():
                     "torch_rng_state": torch.get_rng_state(),
                 },
             }
-            Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
+            if args.train.save_optimizer_state:
+                Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
             dist.barrier()
             logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
             if args.train.global_rank == 0 and args.train.save_total_limit > 0:

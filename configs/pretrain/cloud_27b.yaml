@@ -47,7 +47,8 @@ train:
   weight_decay: 0.01
   max_grad_norm: 1.0
   enable_mixed_precision: true
-  enable_gradient_checkpointing: false
+  enable_gradient_checkpointing: true
+  save_optimizer_state: false
   enable_full_shard: false
   enable_fsdp_offload: false
   enable_activation_offload: false

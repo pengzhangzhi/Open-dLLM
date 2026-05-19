@@ -513,6 +513,10 @@ class TrainingArguments:
         default=0,
         metadata={"help": "Maximum number of step-based checkpoints to keep. 0 = keep all. Oldest are deleted first."},
     )
+    save_optimizer_state: bool = field(
+        default=True,
+        metadata={"help": "Save DeepSpeed ZeRO optimizer state with each checkpoint. Set False to save only HF weights (~54GB for 27B) and skip the full ZeRO state (~211GB). Cannot resume training when False."},
+    )
     freeze_layers: Optional[str] = field(
         default=None,
         metadata={"help": "Comma-separated layer patterns to freeze (e.g., 'attn,mlp'). Uses case-insensitive substring matching."},
