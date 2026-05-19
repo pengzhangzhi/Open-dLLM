@@ -820,6 +820,15 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
         Returns:
             CausalLMOutputWithPast model output
         """
+        import sys, os as _os
+        _r = dist.get_rank() if dist.is_initialized() else 0
+        if _r == 0:
+            _cnt = getattr(self, "_fwd_cnt", 0) + 1
+            self._fwd_cnt = _cnt
+            sys.stderr.write(f"[FWD#{_cnt}] labels={labels.shape if labels is not None else None} mask_ratio={mask_ratio.shape if mask_ratio is not None else None} liger={is_liger_kernel_available()}\n")
+            sys.stderr.flush()
+            _os.fsync(sys.stderr.fileno())
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
 
