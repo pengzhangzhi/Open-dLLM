@@ -20,7 +20,7 @@ multi-head attention, with per-layer routing controlled by
 representation alignment distillation, and liger kernel integration.
 """
 
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -28,16 +28,11 @@ import torch.nn as nn
 from torch.nn import functional as F
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation import GenerationMixin
-from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
-from transformers.processing_utils import Unpack
+from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
@@ -45,18 +40,15 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 
+from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
 from veomni.models.transformers.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
 from veomni.models.transformers.qwen3_5.delta_rule import (
     chunk_gated_delta_rule_pytorch,
-    fused_recurrent_gated_delta_rule_pytorch,
 )
-from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
 
 from ....data.constants import IGNORE_INDEX
 from ....distributed.parallel_state import get_parallel_state
 from ....distributed.sequence_parallel import (
-    gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
     reduce_sequence_parallel_loss,
     slice_position_embedding,
 )
@@ -68,7 +60,6 @@ from ...module_utils import GradientCheckpointingLayer
 
 if is_liger_kernel_available():
     from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
-    from liger_kernel.transformers.rope import liger_rotary_pos_emb
 
 
 logger = logging.get_logger(__name__)

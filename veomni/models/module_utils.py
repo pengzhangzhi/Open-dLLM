@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Literal, Optional, Sequence, Tuple, Union
 
 import torch
+
 # from hdfs_io import hput
 from torch import distributed as dist
 from torch import nn
@@ -405,6 +406,7 @@ def save_model_assets(output_dir: Union[str, "os.PathLike"], model_assets: Seque
 
 
 from functools import partial
+
 
 class GradientCheckpointingLayer(nn.Module):
     """Base class for layers with gradient checkpointing.

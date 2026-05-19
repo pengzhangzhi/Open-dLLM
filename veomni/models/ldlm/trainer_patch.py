@@ -27,10 +27,10 @@ Key metrics logged to wandb:
   - Latent histograms every 500 steps
 """
 
-import math
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Optional
 
 
 class LDLMTrainer:

@@ -21,11 +21,12 @@ Qwen3.6 hidden states into a compact latent space for diffusion modeling.
 Reference: LDLM (arXiv:2605.07933)
 """
 
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import AutoModel
-from typing import Dict, Optional, Tuple
+
 
 # ---------------------------------------------------------------------------
 # Perceiver components

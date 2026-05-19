@@ -4,7 +4,6 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
-from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import (
@@ -28,8 +27,6 @@ from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
 from ....data.constants import IGNORE_INDEX
 from ....distributed.parallel_state import get_parallel_state
 from ....distributed.sequence_parallel import (
-    gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
     reduce_sequence_parallel_loss,
     slice_position_embedding,
 )
@@ -834,7 +831,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
-        
+
         self.teacher_model = None
         # If set, repr_align cosine loss is computed only on these hidden-state
         # indices (0 = embedding output, 1..N = transformer blocks). Used with
@@ -922,7 +919,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        
+
         loss_components = {}
 
         if not get_parallel_state().sp_enabled and labels is not None:
@@ -943,11 +940,11 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                     )
                 )
                 labels[cu_seq_lens[1:-1] - 1] = IGNORE_INDEX
-        
+
         if mask_ratio is not None:
             is_causal = False
             mask_ratio = mask_ratio[..., 1:].contiguous()
-        
+
         # Enable hidden states output for multi-layer alignment if teacher model is active
         if (self.teacher_model is not None \
             and repr_align_wt is not None \
@@ -971,7 +968,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
         )
 
         hidden_states = outputs[0]
-        
+
         # Compute multi-layer representation alignment loss
         repr_align_loss = None
         teacher_outputs = None
@@ -981,7 +978,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             and self.training \
             and labels is not None \
             and mask_ratio is not None):
-            
+
             # Get teacher model outputs with all hidden states
             with torch.no_grad():
                 teacher_outputs = self.teacher_model(
@@ -994,7 +991,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                     is_causal=True,  # Teacher always uses causal attention
                     **kwargs,
                 )
-            
+
             # Get all layer representations
             student_hidden_states = outputs.hidden_states
             teacher_hidden_states = teacher_outputs.hidden_states
@@ -1027,7 +1024,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                         student_stacked,
                         teacher_stacked,
                     )
-        
+
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         hidden_states = hidden_states[:, slice_indices, :]
@@ -1040,7 +1037,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             labels = labels.view(-1)  # flatten label
             if is_liger_kernel_available():
                 from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss  # type: ignore
-                
+
                 if mask_ratio is not None:
                     loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="none", ignore_index=IGNORE_INDEX)
                     if not get_parallel_state().sp_enabled:
@@ -1084,7 +1081,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
 
         else:
             logits = self.lm_head(hidden_states)
-        
+
         # Add representation alignment loss
         if repr_align_loss is not None:
             loss = loss + repr_align_wt * repr_align_loss

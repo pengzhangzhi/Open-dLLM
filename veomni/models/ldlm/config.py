@@ -16,7 +16,7 @@
 LDLM configuration dataclass for integration with Open-dLLM's Hydra-style config.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
