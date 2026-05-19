@@ -160,6 +160,21 @@ See **`docs/cloud_training.md`** for the full Vast.ai setup guide (instance prov
 - **SSH** (port changes per instance): `ssh -i ~/.ssh/id_ed25519 -p <PORT> root@<IP>`
 - **Workspace**: `/workspace/Open-dLLM`
 - **Python venv**: `/workspace/Open-dLLM/.venv/bin/python3` (no pip — use `/root/.local/bin/uv pip install`)
+- **Rate**: UNKNOWN — update this field immediately after provisioning (see checklist below)
+
+### Instance provisioning checklist
+Whenever a new Vast.ai instance is provisioned, record these details here before doing anything else:
+
+1. **Verify billing rate** — fetch https://cloud.vast.ai/billing/ (or use the Vast.ai CLI: `vastai show instances`) and confirm the $/hr shown matches what was selected. Update the **Rate** field above.
+2. **Record instance ID** — `vastai show instances` → note the numeric instance ID.
+3. **Update SSH details** — copy the new `ssh -p <PORT> root@<IP>` from the Vast.ai console and update any scripts/memory files.
+4. **Verify disk** — `df -h /data` to confirm storage is mounted before starting any downloads.
+
+Example rate-check (requires `vastai` CLI with API key):
+```bash
+vastai show instances --raw | python3 -c "import sys,json; [print(f\"id={i['id']} cost={i['dph_total']:.4f} $/hr\") for i in json.load(sys.stdin)]"
+```
+Or open https://cloud.vast.ai/billing/ in a browser to see running charges.
 
 ### On-instance paths
 ```
