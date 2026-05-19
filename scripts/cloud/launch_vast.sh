@@ -13,6 +13,9 @@
 
 set -e
 
+# Configurable repo URL — override via env var for forks
+REPO_URL="${OPEN_DLLM_REPO:-https://github.com/johndpope/Open-dLLM.git}"
+
 # Defaults
 GPU_FILTER=""
 REGION_FILTER=""
@@ -169,7 +172,7 @@ git lfs install
 
 # Clone repo
 cd /workspace
-git clone https://github.com/scrya-com/Open-dLLM.git
+git clone "${REPO_URL}"
 cd Open-dLLM
 
 # Install uv + deps

@@ -141,7 +141,7 @@ echo ""
 echo "Launching with $NUM_GPUS GPUs..."
 echo ""
 
-CUDA_VISIBLE_DEVICES=0,$([ "$NUM_GPUS" -gt 1 ] && seq -s, 1 $((NUM_GPUS-1))) \
+CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS-1))) \
     .venv/bin/torchrun --nproc_per_node="$NUM_GPUS" \
     tasks/train_torch.py /tmp/train_cloud.yaml
 

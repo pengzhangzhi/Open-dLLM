@@ -79,7 +79,7 @@ def build_ds_config(train_args: "TrainingArguments") -> dict:
         offload = {"device": train_args.ds_offload_param}
         if train_args.ds_offload_param == "nvme":
             offload["nvme_path"] = train_args.ds_nvme_path
-            offload["buffer_size"] = 2_000_000_000  # 2B elements ~ 4GB, must exceed combined partition size
+            offload["buffer_size"] = 2_000_000_000  # 2 GB in bytes; must exceed per-rank param partition size
         zero["offload_param"] = offload
 
     return config

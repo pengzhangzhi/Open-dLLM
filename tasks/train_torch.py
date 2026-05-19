@@ -280,9 +280,10 @@ def main():
             patch_deepspeed_zero_init_for_meta_tensors as _patch_ds_meta,
         )
         _patch_ds_meta()
+        _ds_remote_device = "nvme" if args.train.ds_offload_param == "nvme" else "cpu"
         _ds_zero_ctx = _ds_import.zero.Init(
             config_dict_or_path=_build_ds_config_early(args.train),
-            remote_device="cpu",
+            remote_device=_ds_remote_device,
         )
         _ds_zero_ctx.__enter__()
 

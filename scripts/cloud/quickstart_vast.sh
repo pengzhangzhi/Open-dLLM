@@ -19,6 +19,9 @@
 
 set -e
 
+# Configurable repo URL — override via env var for forks
+REPO_URL="${OPEN_DLLM_REPO:-https://github.com/johndpope/Open-dLLM.git}"
+
 VAST_API_KEY="${VAST_API_KEY:-$(cat ~/.vast_api_key 2>/dev/null || vastai api-key 2>/dev/null)}"
 if [ -z "$VAST_API_KEY" ]; then
     echo "ERROR: Set VAST_API_KEY or run: vastai set api-key YOUR_KEY"
@@ -100,7 +103,7 @@ ENV_STRING="-e DS_SKIP_CUDA_CHECK=1 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segmen
 [ -n "$WANDB_API_KEY" ] && ENV_STRING="$ENV_STRING -e WANDB_API_KEY=$WANDB_API_KEY"
 [ -n "$HF_TOKEN" ] && ENV_STRING="$ENV_STRING -e HF_TOKEN=$HF_TOKEN"
 
-ONSTART_SCRIPT=$(cat <<'INNEREOF'
+ONSTART_SCRIPT=$(cat <<INNEREOF
 #!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -114,11 +117,11 @@ git lfs install
 
 # Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="\$HOME/.local/bin:\$PATH"
 
 # Clone repo
 cd /workspace
-git clone https://github.com/scrya-com/Open-dLLM.git
+git clone "${REPO_URL}"
 cd Open-dLLM
 
 # Install deps
