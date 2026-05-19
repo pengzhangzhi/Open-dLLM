@@ -149,3 +149,58 @@ Key facts:
 - Repr-Align teacher is a frozen anchor → precompute hidden states **once**, cache to the 12 TB drive, reuse forever. Do not build live RPC teacher infra.
 - 35B-A3B student state is ~580 GB; no on-hand machine fits this without CPU offload. Default to **renting 8× H100** ($300–500 per epoch) unless a sustained-local-iteration case is made. DeepSpeed ZeRO-3 + NVMe offload is the local fallback path (see `docs/prd_deepspeed_integration.md`).
 - Split-compute strategy: anchor precompute on MSI → student training on HP Z6 (or rented cluster).
+
+## Cloud Training (Vast.ai)
+
+See **`docs/cloud_training.md`** for the full Vast.ai setup guide (instance provisioning, S3 sync, launch scripts).
+
+### Active instance (may change on restart)
+- **Hardware**: 2× RTX PRO 6000 Blackwell Max-Q Workstation Edition, 97.9 GB VRAM each, SM 12.0
+- **CUDA**: 13.0, PyTorch 2.12.0+cu130
+- **SSH** (port changes per instance): `ssh -i ~/.ssh/id_ed25519 -p <PORT> root@<IP>`
+- **Workspace**: `/workspace/Open-dLLM`
+- **Python venv**: `/workspace/Open-dLLM/.venv/bin/python3` (no pip — use `/root/.local/bin/uv pip install`)
+
+### On-instance paths
+```
+/data/models/Qwen3.6-27B/          # model weights
+/data/anchors/qwen3.6-27b/         # precomputed Repr-Align anchor cache (1085 files, 27 GB)
+/data/training/data_smoke_1000.jsonl
+/data/checkpoints/qwen3.6-27b-repr-align/
+/data/ds_offload/                  # DeepSpeed NVMe offload scratch
+```
+
+### Cloud training config
+`configs/pretrain/cloud_27b.yaml` — 27B Repr-Align on 2× RTX PRO 6000 Blackwell.
+
+Launch command:
+```bash
+cd /workspace/Open-dLLM
+nohup .venv/bin/torchrun --nproc_per_node=2 tasks/train_torch.py configs/pretrain/cloud_27b.yaml \
+    > /tmp/train.log 2>&1 &
+echo $! > /tmp/train.pid
+```
+
+Monitor: `tail -f /tmp/train.log`
+Push checkpoint to S3: `bash scripts/cloud/push_ckpt_s3.sh`
+
+### Critical gotchas for Qwen3.6-27B (qwen3_5 architecture)
+
+**Gated DeltaNet NaN backward pass** — Qwen3.6-27B uses `model_type: qwen3_5`, which has 75% Gated DeltaNet linear attention layers (every 4th layer is full attention). Without `flash-linear-attention` + `causal-conv1d`, training falls back to a torch sequential implementation that produces NaN gradients from step 2 onward. Symptoms: step 1 trains fine (loss ~9.3, large grad_norm), step 2+ shows `loss=nan, grad_norm=3.61` (DeepSpeed detects NaN, skips optimizer step, returns stale grad_norm).
+
+Install fix:
+```bash
+cd /workspace/Open-dLLM
+/root/.local/bin/uv pip install causal-conv1d flash-linear-attention
+```
+If pre-built wheels don't exist for SM 12.0 / CUDA 13.0, build from source:
+```bash
+CAUSAL_CONV1D_FORCE_BUILD=TRUE /root/.local/bin/uv pip install causal-conv1d
+MAX_JOBS=4 /root/.local/bin/uv pip install git+https://github.com/fla-org/flash-linear-attention
+```
+
+**`save_time_interval_minutes` bypasses `save_optimizer_state: false`** — The time-based checkpoint path in `train_torch.py` called `engine.save_checkpoint()` directly, writing 211 GB ZeRO-3 state regardless of `save_optimizer_state`. Fixed by guarding with `if save_time and args.train.save_optimizer_state:`. Always set `save_time_interval_minutes: 0` in cloud configs.
+
+**`anyprecision_adamw` NaN with bf16** — This optimizer stores the second moment `v` in bf16; small gradients cause `v=0` in bf16, giving `update = m/eps` → NaN. Use `optimizer: adamw` (fp32 states) for training stability.
+
+**`repr_align_sub_sample_ratio: 0.25`** — Randomly samples 25% of token positions for cosine-sim alignment loss. Cuts alignment gradient memory ~4×. Required for 2× Blackwell at seq_len 2048 with ZeRO-3.

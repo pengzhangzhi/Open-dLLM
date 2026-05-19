@@ -532,6 +532,16 @@ def main():
             total_loss = 0
             torch.cuda.synchronize()
             start_time = time.time()
+
+            # NaN param check: scan first 5 params before forward on step > 1
+            if global_step > 1 and args.train.local_rank == 0:
+                nan_params = [
+                    n for n, p in list(model.named_parameters())[:20]
+                    if p.data.is_floating_point() and not torch.isfinite(p.data).all()
+                ]
+                if nan_params:
+                    logger.warning_rank0(f"[step {global_step}] NaN/Inf in params before forward: {nan_params[:5]}")
+
             for micro_batch in micro_batches:
                 environ_meter.add(micro_batch)
 
@@ -545,11 +555,31 @@ def main():
                     for name, value in loss_components.items():
                         step_loss_components[name] = step_loss_components.get(name, 0.0) + value / len(micro_batches)
 
+                    # Log loss breakdown when NaN detected
+                    if not torch.isfinite(loss_tensor) and args.train.local_rank == 0:
+                        comp_str = ", ".join(f"{k}={v:.4f}" for k, v in loss_components.items())
+                        logger.warning_rank0(
+                            f"[step {global_step}] NaN loss detected. raw_loss={outputs.loss.mean():.4f} components=[{comp_str}]"
+                        )
+
                 with model_bwd_context:
                     if ds_engine is not None:
                         ds_engine.backward(loss_tensor)
                     else:
                         loss_tensor.backward()
+
+                # Gradient NaN scan after backward (first occurrence only)
+                if global_step <= 3 and args.train.local_rank == 0:
+                    nan_grads = [
+                        n for n, p in model.named_parameters()
+                        if p.grad is not None and not torch.isfinite(p.grad).all()
+                    ]
+                    if nan_grads:
+                        logger.warning_rank0(
+                            f"[step {global_step}] NaN grads in {len(nan_grads)} params: {nan_grads[:5]}"
+                        )
+                    else:
+                        logger.info_rank0(f"[step {global_step}] All gradients finite after backward")
 
                 total_loss += loss_tensor.item()
                 del micro_batch
