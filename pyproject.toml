@@ -59,6 +59,9 @@ dev = [
 deepspeed = [
     "deepspeed>=0.15.0",
 ]
+vision = [
+    "torchvision",
+]
 
 [tool.ruff]
 target-version = "py311"
