@@ -942,12 +942,29 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             is_causal = False
             mask_ratio = mask_ratio[..., 1:].contiguous()
 
-        # Enable hidden states output for multi-layer alignment if teacher model is active
-        if (self.teacher_model is not None \
-            and repr_align_wt is not None \
-            and repr_align_wt > 0 \
-            and self.training):
-            output_hidden_states = True
+        # Hook-based selective hidden state capture for repr_align.
+        # output_hidden_states=True retains ALL N layer tensors as Python refs,
+        # which defeats gradient checkpointing — GC cannot free them.
+        # Forward hooks on only the align_layers indices let GC recompute the rest.
+        _repr_align_active = (
+            self.teacher_model is not None
+            and repr_align_wt is not None
+            and repr_align_wt > 0
+            and self.training
+        )
+        _captured_student: dict = {}
+        _student_hooks: list = []
+        if _repr_align_active:
+            if self.align_layers is not None:
+                for _idx in self.align_layers:
+                    def _make_hook(idx: int):
+                        def _hook(module, inp, out):
+                            _captured_student[idx] = out[0] if isinstance(out, tuple) else out
+                        return _hook
+                    # hidden_states[i] = output of layers[i-1] (index 0 is embedding)
+                    _student_hooks.append(self.model.layers[_idx - 1].register_forward_hook(_make_hook(_idx)))
+            else:
+                output_hidden_states = True  # fallback: align_layers not set
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs: BaseModelOutputWithPast = self.model(
@@ -963,6 +980,8 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             is_causal=is_causal,
             **kwargs,
         )
+        for _h in _student_hooks:
+            _h.remove()
 
         hidden_states = outputs[0]
 
@@ -989,14 +1008,16 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                     **kwargs,
                 )
 
-            # Get all layer representations
-            student_hidden_states = outputs.hidden_states
+            # Student hidden states: prefer hook-captured (only align_layers retained),
+            # fall back to outputs.hidden_states if hooks weren't used.
+            if _captured_student:
+                student_hidden_states = tuple(_captured_student[i] for i in self.align_layers)
+            else:
+                student_hidden_states = outputs.hidden_states
+                if self.align_layers is not None:
+                    student_hidden_states = tuple(student_hidden_states[i] for i in self.align_layers)
             teacher_hidden_states = teacher_outputs.hidden_states
-
-            # Subset to align_layers if configured (required when using a
-            # CachedTeacher, which only populates those indices).
             if self.align_layers is not None:
-                student_hidden_states = tuple(student_hidden_states[i] for i in self.align_layers)
                 teacher_hidden_states = tuple(teacher_hidden_states[i] for i in self.align_layers)
 
             loss_mask = (labels != IGNORE_INDEX)  # (L,)

@@ -606,8 +606,24 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin):
             is_causal = False
             mask_ratio = mask_ratio[..., 1:].contiguous()
 
-        if (self.teacher_model is not None and repr_align_wt is not None and repr_align_wt > 0 and self.training):
-            output_hidden_states = True
+        _repr_align_active = (
+            self.teacher_model is not None
+            and repr_align_wt is not None
+            and repr_align_wt > 0
+            and self.training
+        )
+        _captured_student: dict = {}
+        _student_hooks: list = []
+        if _repr_align_active:
+            if self.align_layers is not None:
+                for _idx in self.align_layers:
+                    def _make_hook(idx: int):
+                        def _hook(module, inp, out):
+                            _captured_student[idx] = out[0] if isinstance(out, tuple) else out
+                        return _hook
+                    _student_hooks.append(self.model.layers[_idx - 1].register_forward_hook(_make_hook(_idx)))
+            else:
+                output_hidden_states = True
 
         # Model forward — returns (output, aux_losses)
         model_outputs, aux_losses = self.model(
@@ -622,6 +638,8 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin):
             cache_position=cache_position,
             is_causal=is_causal,
         )
+        for _h in _student_hooks:
+            _h.remove()
 
         hidden_states = model_outputs[0]
         total_aux_loss = sum(aux_losses) if aux_losses else None
@@ -642,11 +660,14 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin):
                     is_causal=True,
                 )
 
-            student_hidden_states = model_outputs.hidden_states
+            if _captured_student:
+                student_hidden_states = tuple(_captured_student[i] for i in self.align_layers)
+            else:
+                student_hidden_states = model_outputs.hidden_states
+                if self.align_layers is not None:
+                    student_hidden_states = tuple(student_hidden_states[i] for i in self.align_layers)
             teacher_hidden_states = teacher_model_out.hidden_states
-
             if self.align_layers is not None:
-                student_hidden_states = tuple(student_hidden_states[i] for i in self.align_layers)
                 teacher_hidden_states = tuple(teacher_hidden_states[i] for i in self.align_layers)
 
             loss_mask = (labels != IGNORE_INDEX)
