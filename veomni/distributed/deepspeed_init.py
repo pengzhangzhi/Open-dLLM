@@ -179,7 +179,14 @@ def load_hf_weights_zero3(model: "torch.nn.Module", weights_path: str) -> None:
             param = param_dict[model_pname]
             with deepspeed.zero.GatheredParameters(param, modifier_rank=0):
                 if dist.get_rank() == 0 and pname in shard_weights:
-                    param.data.copy_(shard_weights[pname].to(dtype=param.dtype))
+                    src = shard_weights[pname].to(dtype=param.dtype)
+                    if param.data.shape != src.shape:
+                        logger.warning_rank0(
+                            f"  Shape mismatch skip: {pname} → {model_pname}: "
+                            f"model={tuple(param.data.shape)} ckpt={tuple(src.shape)}"
+                        )
+                        continue
+                    param.data.copy_(src)
         del shard_weights
         if i % 5 == 0 or i == n_files - 1:
             logger.info_rank0(f"  ZeRO-3 weight load: shard {i + 1}/{n_files} ({fname})")
