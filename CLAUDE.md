@@ -160,15 +160,18 @@ See **`docs/cloud_training.md`** for the full Vast.ai setup guide (instance prov
 - **SSH** (port changes per instance): `ssh -i ~/.ssh/id_ed25519 -p <PORT> root@<IP>`
 - **Workspace**: `/workspace/Open-dLLM`
 - **Python venv**: `/workspace/Open-dLLM/.venv/bin/python3` (no pip — use `/root/.local/bin/uv pip install`)
-- **Rate**: UNKNOWN — update this field immediately after provisioning (see checklist below)
+- **Rate (Instance 37044404, 2026-05-19)**: Bid $0.48/hr spot → charged $2.773/hr GPU + $0.194/hr storage + $0.033/GB download. Total ~$23.57 for 7 hrs (incl. 84.2 GB model download at $2.74). Spot bid was auto-upgraded to on-demand when host raised ask.
+- **Rate**: Update this field immediately after provisioning (see checklist below)
 
 ### Instance provisioning checklist
 Whenever a new Vast.ai instance is provisioned, record these details here before doing anything else:
 
-1. **Verify billing rate** — fetch https://cloud.vast.ai/billing/ (or use the Vast.ai CLI: `vastai show instances`) and confirm the $/hr shown matches what was selected. Update the **Rate** field above.
-2. **Record instance ID** — `vastai show instances` → note the numeric instance ID.
-3. **Update SSH details** — copy the new `ssh -p <PORT> root@<IP>` from the Vast.ai console and update any scripts/memory files.
-4. **Verify disk** — `df -h /data` to confirm storage is mounted before starting any downloads.
+1. **Verify billing rate** — fetch https://cloud.vast.ai/billing/ and confirm the $/hr shown matches what was selected. Update the **Rate** field above. **Do not assume spot bid = actual charge** — hosts can raise their ask and Vast.ai silently upgrades to on-demand.
+2. **Set interruption, not auto-upgrade** — when bidding spot, enable "interruptible" so the instance stops rather than silently charging on-demand rates if the host raises price.
+3. **Record instance ID** — `vastai show instances` → note the numeric instance ID.
+4. **Update SSH details** — copy the new `ssh -p <PORT> root@<IP>` from the Vast.ai console and update any scripts/memory files.
+5. **Verify disk** — `df -h /data` to confirm storage is mounted before starting any downloads.
+6. **Avoid re-downloading model weights** — 84.2 GB download cost $2.74 on instance 37044404. Reuse a persistent disk image or snapshot if available.
 
 Example rate-check (requires `vastai` CLI with API key):
 ```bash
