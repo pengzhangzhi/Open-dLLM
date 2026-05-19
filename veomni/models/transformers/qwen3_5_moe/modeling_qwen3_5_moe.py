@@ -19,27 +19,24 @@ and Qwen3_5Attention with the dense qwen3_5 package. Adds MoE-specific classes
 for expert routing, load-balancing aux loss, and shared expert.
 """
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import Cache
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.processing_utils import Unpack
 from transformers.utils import (
     add_start_docstrings,
     can_return_tuple,
     replace_return_docstrings,
 )
 
-from veomni.models.transformers.qwen3_5.delta_rule import chunk_gated_delta_rule_pytorch
+from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
 from veomni.models.transformers.qwen3_5.modeling_qwen3_5 import (
-    KwargsForCausalLM,
     Qwen3_5Attention,
     Qwen3_5DynamicCache,
     Qwen3_5GatedDeltaNet,
@@ -47,15 +44,12 @@ from veomni.models.transformers.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5PreTrainedModel,
     Qwen3_5RMSNorm,
     Qwen3_5RMSNormGated,
-    apply_rotary_pos_emb_partial,
     get_parallel_state,
-    is_fla_available,
     is_liger_kernel_available,
     reduce_sequence_parallel_loss,
     repr_align_loss_fn,
 )
 from veomni.models.transformers.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeConfig
-from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
 
 from ....data.constants import IGNORE_INDEX
 from ....distributed.parallel_state import get_parallel_state
@@ -249,7 +243,7 @@ class Qwen3_5MoeDecoderLayer(GradientCheckpointingLayer):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.layer_type = config.layer_types[layer_idx] if hasattr(config, 'layer_types') else "full_attention"
+        self.layer_type = config.layer_types[layer_idx] if hasattr(config, 'layer_types') and layer_idx < len(config.layer_types) else "full_attention"
 
         if self.layer_type == "full_attention":
             self.self_attn = Qwen3_5Attention(config, layer_idx)
@@ -475,6 +469,35 @@ class Qwen3_5MoeModel(Qwen3_5MoePreTrainedModel):
 # ForCausalLM
 # ---------------------------------------------------------------------------
 
+class Qwen3_5MTPHead(nn.Module):
+    """Qwen3.6-style NextN Multi-Token Prediction head.
+
+    Lightweight: 1 decoder layer + RMSNorm + tied lm_head.
+    Takes hidden_states from the main model, predicts next-N tokens.
+    """
+
+    def __init__(self, config: Qwen3_5MoeConfig):
+        super().__init__()
+        self.num_layers = config.mtp_num_layers
+        self.hidden_size = config.hidden_size
+        self.vocab_size = config.vocab_size
+
+        self.layers = nn.ModuleList([
+            Qwen3_5MoeDecoderLayer(config, layer_idx=config.num_hidden_layers + i)
+            for i in range(self.num_layers)
+        ])
+        self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+    def forward(self, hidden_states: torch.Tensor, **kwargs):
+        for layer in self.layers:
+            layer_outputs = layer(hidden_states, **kwargs)
+            hidden_states = layer_outputs[0]
+        hidden_states = self.norm(hidden_states)
+        logits = self.lm_head(hidden_states)
+        return logits
+
+
 class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
@@ -488,6 +511,11 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.loss_function = causallm_loss_function
         self.teacher_model = None
+
+        # MTP (Multi-Token Prediction, Qwen3.6-style NextN)
+        self.mtp_head = None
+        if getattr(config, "mtp_num_layers", 0) > 0:
+            self.mtp_head = Qwen3_5MTPHead(config)
 
         self.post_init()
 
@@ -682,6 +710,21 @@ class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin):
 
         if "mdm" not in loss_components and loss is not None and labels is not None:
             loss_components["mdm"] = loss.detach()
+
+        # MTP auxiliary loss
+        mtp_loss_val = None
+        if self.mtp_head is not None and self.training and loss is not None:
+            mtp_logits = self.mtp_head(model_outputs[0], attention_mask=attention_mask, position_ids=position_ids)
+            mtp_labels = input_ids[:, self.config.mtp_n_predict:].contiguous()
+            mtp_labels = mtp_labels.view(-1)
+            mtp_logits_flat = mtp_logits[:, :mtp_labels.shape[0] // mtp_labels.shape[0] if mtp_labels.shape[0] > 0 else 0, :]
+            # Simple CE loss on MTP predictions
+            mtp_logits_trimmed = mtp_logits[:, :mtp_labels.shape[0], :].contiguous().view(-1, self.vocab_size)
+            if mtp_labels.shape[0] > 0 and mtp_logits_trimmed.shape[0] >= mtp_labels.shape[0]:
+                mtp_logits_trimmed = mtp_logits_trimmed[:mtp_labels.shape[0]]
+                mtp_loss_val = F.cross_entropy(mtp_logits_trimmed, mtp_labels, ignore_index=IGNORE_INDEX)
+                loss = loss + self.config.mtp_loss_weight * mtp_loss_val
+                loss_components["mtp"] = mtp_loss_val.detach()
 
         result = CausalLMOutputWithPast(
             loss=loss,

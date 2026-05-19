@@ -337,6 +337,30 @@ class TrainingArguments:
         default="v",
         metadata={"help": "Cola DiT prediction target: 'v' (Flow Matching velocity, paper default) or 'x0' (x0-prediction MSE)."},
     )
+    cola_variant: str = field(
+        default="block_causal",
+        metadata={"help": "ColaDLM causal diffusion variant: 'block_causal' (Guide Labs), 'card' (soft-tail), 'fast_block' (Fast-dLLM v2)."},
+    )
+    cola_lambda_tail: float = field(
+        default=0.6,
+        metadata={"help": "CARD soft-tail aggressiveness (0.0–1.0). Only used when cola_variant='card'."},
+    )
+    # ------------------------------------------------------------------
+    # MTP (Multi-Token Prediction, Qwen3.6-style NextN)
+    # auxiliary head. Off when mtp_num_layers == 0.
+    # ------------------------------------------------------------------
+    mtp_num_layers: int = field(
+        default=0,
+        metadata={"help": "Number of MTP prediction layers (0 = disabled)."},
+    )
+    mtp_loss_weight: float = field(
+        default=0.1,
+        metadata={"help": "MTP auxiliary loss scaling factor."},
+    )
+    mtp_n_predict: int = field(
+        default=1,
+        metadata={"help": "Number of future tokens MTP head predicts."},
+    )
     dyn_bsz: bool = field(
         default=True,
         metadata={"help": "Enable dynamic batch size for padding-free training."},

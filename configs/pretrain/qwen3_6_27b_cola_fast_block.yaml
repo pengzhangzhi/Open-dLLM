@@ -1,0 +1,92 @@
+# 27B Repr-Align + Cola DLM — FastBlock variant
+# Block-causal + complementary masks + token-shift on Qwen3.6-27B (dense).
+#
+# Launch (Vast.ai 2×A100):
+#   CUDA_VISIBLE_DEVICES=0,1 DS_SKIP_CUDA_CHECK=1 \
+#       torchrun --nproc-per-node=2 \
+#       tasks/train_torch.py configs/pretrain/qwen3_6_27b_cola_fast_block.yaml
+
+model:
+  model_path: /data/models/Qwen3.6-27B
+  attn_implementation: sdpa
+
+data:
+  train_path: /data/training/data_smoke_1000.jsonl
+  train_size: 1000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /data/checkpoints/qwen3.6-27b-cola-fast-block
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 3
+  ds_offload_optimizer: cpu
+  ds_offload_param: cpu
+  ds_overlap_comm: true
+  ds_contiguous_gradients: true
+
+  ulysses_parallel_size: 1
+  expert_parallel_size: 1
+  global_batch_size: 2
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /data/anchors/qwen3.6-27b
+  align_layers: "16,32,48,64"
+  repr_align_sub_sample_ratio: 0.25
+
+  # ---- Cola DLM — FastBlock variant ----
+  cola_wt: 0.5
+  cola_variant: fast_block
+  cola_num_global: 16
+  cola_num_local: 64
+  cola_block_size: 8
+  cola_encoder_depth: 2
+  cola_diffusion_depth: 4
+  cola_heads: 8
+  cola_source_layer: -3
+  cola_detach_student: true
+  cola_log_hist_every: 200
+  cola_prediction: v
+
+  max_steps: 10
+  optimizer: adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cpu
+  enable_full_determinism: false
+  empty_cache_steps: 5
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_hf_weights: false
+  auto_resume: true
+  save_time_interval_minutes: 60
+
+  use_wandb: true
+  wandb_project: open-dllm-27b
+  wandb_name: qwen3.6-27b-cola-fast-block

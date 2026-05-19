@@ -17,7 +17,6 @@
 Extends Qwen3_5Config with MoE-specific parameters.
 """
 
-from typing import List, Optional
 
 from veomni.models.transformers.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
 
@@ -44,3 +43,8 @@ class Qwen3_5MoeConfig(Qwen3_5Config):
         self.shared_expert_intermediate_size = shared_expert_intermediate_size
         self.norm_topk_prob = norm_topk_prob
         self.router_aux_loss_coef = router_aux_loss_coef
+
+        # MTP (Multi-Token Prediction, Qwen3.6-style NextN)
+        self.mtp_num_layers = kwargs.pop("mtp_num_layers", 0)
+        self.mtp_loss_weight = kwargs.pop("mtp_loss_weight", 0.1)
+        self.mtp_n_predict = kwargs.pop("mtp_n_predict", 1)

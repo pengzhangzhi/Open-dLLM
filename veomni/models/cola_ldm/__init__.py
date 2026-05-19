@@ -45,10 +45,33 @@ existing trainer in `tasks/train_torch.py` only needs an opt-in flag
 LDLM (`veomni.models.ldlm`) is intentionally not touched.
 """
 
+from .block_causal_dit import BlockCausalDiT, ColaDLMHead, make_block_causal_mask
+from .card_head import CardColaDLMHead, make_soft_tail_mask
+from .fast_block_head import FastBlockColaDLMHead, make_complementary_mask
 from .modules import CrossAttention, FeedForward, MaskedSelfAttention, PerceiverResampler, PreNorm
 from .text_vae import TextVAEEncoder
-from .block_causal_dit import BlockCausalDiT, ColaDLMHead, make_block_causal_mask
 from .wrapper import ColaReprAlignWrapper
+
+
+def build_cola_head(dim: int, variant: str = "block_causal", **kwargs):
+    """Factory: build a ColaDLM head for the given variant.
+
+    Args:
+        dim: hidden size of the parent LM.
+        variant: one of 'block_causal', 'card', 'fast_block'.
+        **kwargs: forwarded to the head constructor (num_global, block_size, etc.)
+    """
+    if variant == "block_causal":
+        return ColaDLMHead(dim=dim, **kwargs)
+    elif variant == "card":
+        lambda_tail = kwargs.pop("lambda_tail", 0.6)
+        return CardColaDLMHead(dim=dim, lambda_tail=lambda_tail, **kwargs)
+    elif variant == "fast_block":
+        use_complementary = kwargs.pop("use_complementary", True)
+        return FastBlockColaDLMHead(dim=dim, use_complementary=use_complementary, **kwargs)
+    else:
+        raise ValueError(f"Unknown cola_variant: {variant!r}. Choose from: block_causal, card, fast_block")
+
 
 __all__ = [
     "CrossAttention",
@@ -60,5 +83,10 @@ __all__ = [
     "BlockCausalDiT",
     "ColaDLMHead",
     "ColaReprAlignWrapper",
+    "CardColaDLMHead",
+    "FastBlockColaDLMHead",
     "make_block_causal_mask",
+    "make_soft_tail_mask",
+    "make_complementary_mask",
+    "build_cola_head",
 ]
