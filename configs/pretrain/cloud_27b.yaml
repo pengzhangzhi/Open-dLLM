@@ -64,6 +64,6 @@ train:
   save_epochs: 0
   auto_resume: true
   save_time_interval_minutes: 0
-  use_wandb: false
+  use_wandb: true
   wandb_project: open-dllm-27b
   wandb_name: repr-align-27b-run3
