@@ -34,6 +34,7 @@ train:
   dyn_bsz_buffer_size: 50
   enable_masking: true
   repr_align_wt: 1.0
+  repr_align_sub_sample_ratio: 0.25
   anchor_cache_dir: /data/anchors/qwen3.6-27b
   align_layers: "16,32,48,64"
   freeze_layers: ""
