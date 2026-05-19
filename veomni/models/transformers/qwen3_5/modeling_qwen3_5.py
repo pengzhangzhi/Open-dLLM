@@ -23,6 +23,7 @@ representation alignment distillation, and liger kernel integration.
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.nn import functional as F
 from transformers.activations import ACT2FN
@@ -893,6 +894,16 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
         loss = None
         logits = None
         teacher_loss = None
+
+        # Debug: trace why loss_components might be empty
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() == 0:
+            liger_ok = is_liger_kernel_available()
+            logger.warning(
+                f"[fwd dbg step] labels={'None' if labels is None else labels.shape}, "
+                f"mask_ratio={'None' if mask_ratio is None else mask_ratio.shape}, "
+                f"liger={liger_ok}, "
+                f"hidden_states_nan={not torch.isfinite(hidden_states).all().item()}"
+            )
 
         if labels is not None:
             labels = labels.view(-1)

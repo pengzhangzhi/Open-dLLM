@@ -625,7 +625,7 @@ def main():
                         n for n, p in list(model.named_parameters())[:50]
                         if p.data.is_floating_point() and not torch.isfinite(p.data).all()
                     ]
-                    logger.error_rank0(
+                    logger.warning_rank0(
                         f"ABORT: {nan_abort_threshold} consecutive NaN steps. "
                         f"NaN params (first 5): {nan_params[:5]}"
                     )
