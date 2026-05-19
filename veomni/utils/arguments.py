@@ -672,9 +672,11 @@ class TrainingArguments:
                     raise ValueError(
                         f"NVMe offload requires a valid ds_nvme_path directory, got: '{self.ds_nvme_path}'."
                     )
-            if self.init_device not in ("cpu", "meta"):
+            # zero.Init() (and meta tensors) are only needed for ZeRO-3 parameter
+            # partitioning. ZeRO-1/2 replicate weights like DDP — init on cuda directly.
+            if self.ds_zero_stage == 3 and self.init_device not in ("cpu", "meta"):
                 logger.info_rank0(
-                    f"Forcing init_device='meta' for DeepSpeed mode (was '{self.init_device}')."
+                    f"Forcing init_device='meta' for DeepSpeed ZeRO-3 (was '{self.init_device}')."
                 )
                 object.__setattr__(self, "init_device", "meta")
 

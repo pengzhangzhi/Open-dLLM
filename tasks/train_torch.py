@@ -290,7 +290,7 @@ def main():
     # patch_deepspeed_zero_init_for_meta_tensors() is applied first to handle the
     # meta tensors created by accelerate's init_empty_weights() inside the loader.
     _ds_zero_ctx = None
-    if args.train.data_parallel_mode == "deepspeed" and args.train.init_device in ("meta", "cpu"):
+    if args.train.data_parallel_mode == "deepspeed" and args.train.ds_zero_stage == 3 and args.train.init_device in ("meta", "cpu"):
         import deepspeed as _ds_import
 
         from veomni.distributed.deepspeed_init import (
@@ -376,6 +376,10 @@ def main():
             f"params={n_cola_params/1e6:.1f}M  detach_student={args.train.cola_detach_student}"
         )
 
+        # Move cola_head to same device as the base model before wrapping.
+        # build_cola_head() creates on CPU; the LM may already be on CUDA.
+        _lm_device = next(model.parameters()).device
+        cola_head = cola_head.to(_lm_device)
         model = ColaReprAlignWrapper(
             lm=model,
             cola_head=cola_head,
@@ -413,7 +417,8 @@ def main():
     )
     if get_optimizer_pre_hook is not None:
         optimizer_pre_hook = get_optimizer_pre_hook(model, model_config, args.train.data_parallel_mode)
-        optimizer.register_step_pre_hook(optimizer_pre_hook)
+        if optimizer_pre_hook is not None:
+            optimizer.register_step_pre_hook(optimizer_pre_hook)
 
     lr_scheduler = build_lr_scheduler(
         optimizer,
@@ -439,9 +444,8 @@ def main():
         model = ds_engine
 
         # Load actual HF weights into the ZeRO-3 partitioned model one shard at a time.
-        # Only rank 0 reads each file; GatheredParameters scatters to all ranks.
-        # Peak RAM ≈ one shard file instead of the full 70 GB.
-        if args.train.init_device in ("meta", "cpu"):
+        # Only needed for ZeRO-3 (meta init); ZeRO-1/2 loads weights normally before DS init.
+        if args.train.ds_zero_stage == 3 and args.train.init_device in ("meta", "cpu"):
             from veomni.distributed.deepspeed_init import load_hf_weights_zero3
             logger.info_rank0(f"Loading HF weights into ZeRO-3 model from {args.model.model_path}")
             load_hf_weights_zero3(ds_engine.module, args.model.model_path)
@@ -599,6 +603,8 @@ def main():
                 # DeepSpeed handles gradient clipping + opt step + zero_grad internally
                 ds_engine.step()
                 grad_norm = ds_engine.get_global_grad_norm()
+                if grad_norm is None:  # ZeRO-2 + CPU optimizer may not compute norm
+                    grad_norm = 0.0
             elif args.train.data_parallel_mode == "fsdp1":
                 grad_norm = model.clip_grad_norm_(args.train.max_grad_norm).item()
             else:

@@ -159,7 +159,7 @@ class PerceiverResampler(nn.Module):
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         B = context.shape[0]
-        x = self.latents.expand(B, -1, -1).to(context.dtype)
+        x = self.latents.expand(B, -1, -1).to(dtype=context.dtype, device=context.device)
         for self_attn, cross_attn, ff in self.layers:
             x = self_attn(x) + x
             x = cross_attn(x, context=context) + x

@@ -81,8 +81,15 @@ train:
   enable_gradient_checkpointing: true
   enable_full_shard: false
   enable_fsdp_offload: false
-  enable_activation_offload: true
+  enable_activation_offload: false
   init_device: cuda
+
+  # ZeRO-2 + CPU optimizer offload: LM(1.7B) + Cola(600M) = 2.3B params.
+  # AdamW fp32 states = 18GB — OOM on single 32GB GPU with DDP.
+  # ZeRO-2 keeps params on GPU but offloads optimizer states to CPU (96GB RAM).
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 2
+  ds_offload_optimizer: cpu
   enable_full_determinism: false
   empty_cache_steps: 50
 
