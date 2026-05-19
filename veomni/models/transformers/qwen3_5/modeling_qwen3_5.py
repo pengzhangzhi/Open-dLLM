@@ -150,8 +150,14 @@ class Qwen3_5RotaryEmbedding(nn.Module):
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.rotary_dim = int(self.head_dim * self.partial_rotary_factor)
 
+        # rope_theta may be at top level or nested in rope_parameters (HF 5.x VL configs)
+        rope_theta = getattr(config, "rope_theta", None)
+        if rope_theta is None:
+            rp = getattr(config, "rope_parameters", {})
+            rope_theta = rp.get("rope_theta", 10000000) if isinstance(rp, dict) else 10000000
+
         # Standard inv_freq for the rotary dim portion
-        self.inv_freq = 1.0 / (config.rope_theta ** (torch.arange(0, self.rotary_dim, 2, dtype=torch.float32, device=device) / self.rotary_dim))
+        self.inv_freq = 1.0 / (rope_theta ** (torch.arange(0, self.rotary_dim, 2, dtype=torch.float32, device=device) / self.rotary_dim))
         self.max_seq_len_cached = config.max_position_embeddings
 
     @torch.no_grad()
