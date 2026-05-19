@@ -102,6 +102,7 @@ echo "[2/3] Creating instance (offer $OFFER_ID)..."
 ENV_STRING="-e DS_SKIP_CUDA_CHECK=1 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 [ -n "$WANDB_API_KEY" ] && ENV_STRING="$ENV_STRING -e WANDB_API_KEY=$WANDB_API_KEY"
 [ -n "$HF_TOKEN" ] && ENV_STRING="$ENV_STRING -e HF_TOKEN=$HF_TOKEN"
+[ -n "$AWS_ACCESS_KEY_ID" ] && ENV_STRING="$ENV_STRING -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}"
 
 ONSTART_SCRIPT=$(cat <<INNEREOF
 #!/bin/bash
@@ -110,9 +111,19 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "=== Open-dLLM Cloud Setup ==="
 
+# Persist env vars to bashrc so interactive shells have them
+cat >> /root/.bashrc <<ENVEOF
+export HF_TOKEN="\${HF_TOKEN}"
+export AWS_ACCESS_KEY_ID="\${AWS_ACCESS_KEY_ID}"
+export AWS_SECRET_ACCESS_KEY="\${AWS_SECRET_ACCESS_KEY}"
+export AWS_DEFAULT_REGION="\${AWS_DEFAULT_REGION:-us-east-1}"
+export DS_SKIP_CUDA_CHECK=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENVEOF
+
 # Install system deps
 apt-get update -qq
-apt-get install -y -qq git git-lfs python3-venv python3-pip curl htop nvtop tmux
+apt-get install -y -qq git git-lfs python3-venv python3-pip curl awscli htop nvtop tmux
 git lfs install
 
 # Install uv
@@ -125,18 +136,26 @@ git clone "${REPO_URL}"
 cd Open-dLLM
 
 # Install deps
-uv sync --extra dev
-
-# Pre-build DeepSpeed async_io
-DS_SKIP_CUDA_CHECK=1 .venv/bin/python -c "import deepspeed.ops.op_builder as b; b.AsyncIOBuilder().load(); print('async_io OK')"
+uv sync --extra dev --extra deepspeed
 
 # Download model weights
-echo "Downloading Qwen3.6-27B (~54GB)..."
+echo "=== Downloading Qwen3.6-27B (~54GB)... ==="
+mkdir -p /data/models
 .venv/bin/python -c "
 from huggingface_hub import snapshot_download
-snapshot_download('Qwen/Qwen3.6-27B', local_dir='/data/models/Qwen3.6-27B')
+import os
+snapshot_download('Qwen/Qwen3.6-27B', local_dir='/data/models/Qwen3.6-27B', token=os.environ.get('HF_TOKEN'))
 print('Model downloaded')
 "
+
+# Pull anchor latents from S3
+echo "=== Pulling anchors from S3 (~27GB)... ==="
+mkdir -p /data/anchors/qwen3.6-27b
+aws s3 sync s3://qwen3-6/anchors/qwen3.6-27b/ /data/anchors/qwen3.6-27b/ --no-progress
+
+# Generate smoke data
+echo "=== Generating training data... ==="
+bash /workspace/Open-dLLM/scripts/cloud/prepare_data.sh /data/training
 
 echo ""
 echo "=== Setup complete! ==="

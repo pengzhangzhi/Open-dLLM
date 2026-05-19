@@ -159,15 +159,33 @@ CHOSEN_PRICE=$(echo "$RESULTS" | head -1 | python3 -c "import json,sys; print(js
 echo "Creating instance from offer $CHOSEN (\$${CHOSEN_PRICE}/hr)..."
 
 # Build env vars
-ENV_ARGS=""
+ENV_ARGS="-e DS_SKIP_CUDA_CHECK=1 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 [ -n "$WANDB_KEY" ] && ENV_ARGS="$ENV_ARGS -e WANDB_API_KEY=$WANDB_KEY"
 [ -n "$HF_TOKEN" ] && ENV_ARGS="$ENV_ARGS -e HF_TOKEN=$HF_TOKEN"
+[ -n "$AWS_ACCESS_KEY_ID" ] && ENV_ARGS="$ENV_ARGS -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}"
 
-# Onstart: install deps, clone repo, run setup
-ONSTART=$(cat <<'ONSTART_EOF'
+# Onstart: install deps, clone repo, download model + anchors, generate data
+ONSTART=$(cat <<ONSTART_EOF
 bash -c '
 set -e
-apt-get update -qq && apt-get install -y -qq git git-lfs python3-venv python3-pip curl
+export HF_TOKEN="${HF_TOKEN}"
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+export DS_SKIP_CUDA_CHECK=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# Persist to bashrc
+cat >> /root/.bashrc <<ENVEOF
+export HF_TOKEN="${HF_TOKEN}"
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+export DS_SKIP_CUDA_CHECK=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENVEOF
+
+apt-get update -qq && apt-get install -y -qq git git-lfs python3-venv python3-pip curl awscli
 git lfs install
 
 # Clone repo
@@ -177,29 +195,27 @@ cd Open-dLLM
 
 # Install uv + deps
 curl -LsSf https://astral.sh/uv/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
-uv sync --extra dev
-
-# Pre-build DeepSpeed async_io (CUDA 13.x compatibility)
-DS_SKIP_CUDA_CHECK=1 uv run python -c "import deepspeed.ops.op_builder as b; b.AsyncIOBuilder().load(); print(\"async_io OK\")"
+export PATH="\$HOME/.local/bin:\$PATH"
+uv sync --extra dev --extra deepspeed
 
 # Download model weights (~54GB)
-echo "Downloading Qwen3.6-27B..."
-uv run python -c "
+echo "=== Downloading Qwen3.6-27B... ==="
+mkdir -p /data/models
+.venv/bin/python -c "
 from huggingface_hub import snapshot_download
-snapshot_download(\"Qwen/Qwen3.6-27B\", local_dir=\"/data/models/Qwen3.6-27B\")
+import os
+snapshot_download(\"Qwen/Qwen3.6-27B\", local_dir=\"/data/models/Qwen3.6-27B\", token=os.environ.get(\"HF_TOKEN\"))
 print(\"Model downloaded\")
 "
 
-# Download smoke data
-echo "Downloading training data..."
-mkdir -p /data/training
-uv run python -c "
-from huggingface_hub import hf_hub_download
-# Placeholder — data needs to be provided
-import os
-os.makedirs(\"/data/training\", exist_ok=True)
-"
+# Pull anchor latents from S3
+echo "=== Pulling anchors from S3... ==="
+mkdir -p /data/anchors/qwen3.6-27b
+aws s3 sync s3://qwen3-6/anchors/qwen3.6-27b/ /data/anchors/qwen3.6-27b/ --no-progress
+
+# Generate smoke data
+echo "=== Generating training data... ==="
+bash /workspace/Open-dLLM/scripts/cloud/prepare_data.sh /data/training
 
 echo "=== Instance ready. Run: bash /workspace/Open-dLLM/scripts/cloud/train_27b_vast.sh ==="
 '
