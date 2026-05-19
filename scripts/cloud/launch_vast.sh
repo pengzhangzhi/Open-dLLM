@@ -27,6 +27,10 @@ IMAGE="nvidia/cuda:13.0.0-devel-ubuntu22.04"
 LABEL="open-dllm-27b-repr-align"
 WANDB_KEY="${WANDB_API_KEY:-}"
 HF_TOKEN="${HF_TOKEN:-}"
+# MAX_BID: hard cap on $/hr — instance is INTERRUPTED (not silently upgraded) if host raises above this.
+# Set to 1.0 by default. Override with --max-bid. Instance 37044404 was charged $2.773/hr because
+# this flag was missing and Vast.ai auto-upgraded to on-demand when the host raised price.
+MAX_BID="${VAST_MAX_BID:-1.0}"
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -36,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --gpus) NUM_GPUS="$2"; shift 2 ;;
         --ram) MIN_RAM_GB="$2"; shift 2 ;;
         --label) LABEL="$2"; shift 2 ;;
+        --max-bid) MAX_BID="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -156,7 +161,22 @@ fi
 CHOSEN=${OFFER_IDS[0]}
 CHOSEN_PRICE=$(echo "$RESULTS" | head -1 | python3 -c "import json,sys; print(json.load(sys.stdin)['price_hr'])")
 
-echo "Creating instance from offer $CHOSEN (\$${CHOSEN_PRICE}/hr)..."
+echo "=============================================="
+echo "  BILLING CONFIRMATION"
+echo "  Offer price : \$${CHOSEN_PRICE}/hr"
+echo "  Max bid cap : \$${MAX_BID}/hr  (instance interrupted above this)"
+echo "  Disk        : ${DISK_GB}GB @ ~\$0.194/hr = \$$(echo "scale=2; $DISK_GB * 0.194 / 1000" | bc)/hr"
+echo "  Download    : ~54GB model + ~27GB anchors = ~\$2.74 one-time"
+echo "=============================================="
+if python3 -c "exit(0 if float('${CHOSEN_PRICE}') <= float('${MAX_BID}') else 1)" 2>/dev/null; then
+    echo "  Offer is within max bid. Proceeding."
+else
+    echo "  WARNING: cheapest offer (\$${CHOSEN_PRICE}/hr) exceeds max bid (\$${MAX_BID}/hr)."
+    echo "  Raise --max-bid or wait for cheaper offers. Exiting."
+    exit 1
+fi
+echo ""
+echo "Creating instance from offer $CHOSEN (\$${CHOSEN_PRICE}/hr, capped at \$${MAX_BID}/hr)..."
 
 # Build env vars
 ENV_ARGS="-e DS_SKIP_CUDA_CHECK=1 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
@@ -222,22 +242,46 @@ echo "=== Instance ready. Run: bash /workspace/Open-dLLM/scripts/cloud/train_27b
 ONSTART_EOF
 )
 
-vastai create instance "$CHOSEN" \
+INSTANCE_JSON=$(vastai create instance "$CHOSEN" \
     --image "$IMAGE" \
     --disk "$DISK_GB" \
     --ssh \
     --direct \
     --label "$LABEL" \
+    --price "$MAX_BID" \
     --onstart-cmd "$ONSTART" \
     --env "-e DS_SKIP_CUDA_CHECK=1 -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True $ENV_ARGS" \
-    --raw
+    --raw)
+
+echo "$INSTANCE_JSON"
+INSTANCE_ID=$(echo "$INSTANCE_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('new_contract','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
 
 echo ""
-echo "Instance created! Check status:"
-echo "  vastai show instances"
+echo "=============================================="
+echo "  Instance created: ID=$INSTANCE_ID"
+echo "  Verifying actual billing rate..."
+echo "=============================================="
+sleep 5
+vastai show instance "$INSTANCE_ID" --raw 2>/dev/null | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    actual = d.get('dph_total', 'unknown')
+    status = d.get('actual_status', 'unknown')
+    print(f'  Actual rate : \${actual}/hr')
+    print(f'  Status      : {status}')
+    if isinstance(actual, (int,float)) and actual > float('${MAX_BID}') * 1.05:
+        print(f'  WARNING: actual rate exceeds max bid! Destroy with: vastai destroy instance ${INSTANCE_ID}')
+    else:
+        print(f'  OK: rate is within expected range.')
+except Exception as e:
+    print(f'  Could not parse instance info: {e}')
+" 2>/dev/null || echo "  (run: vastai show instances  to verify rate)"
+
 echo ""
-echo "SSH in:"
-echo "  vastai ssh-url <instance_id>"
+echo "  Check billing: https://cloud.vast.ai/billing/"
+echo "  Show instances: vastai show instances"
+echo "  SSH URL: vastai ssh-url $INSTANCE_ID"
 echo ""
 echo "Then run training:"
 echo "  bash /workspace/Open-dLLM/scripts/cloud/train_27b_vast.sh"
