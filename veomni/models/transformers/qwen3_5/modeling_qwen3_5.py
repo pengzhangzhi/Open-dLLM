@@ -172,26 +172,27 @@ class Qwen3_5RotaryEmbedding(nn.Module):
 
 
 def apply_rotary_pos_emb_partial(q, k, cos, sin, rotary_dim, position_ids=None):
-    """Apply partial rotary position embedding — only first `rotary_dim` dims."""
-    q_partial = q[..., :rotary_dim]
+    """Apply partial rotary position embedding — only first `rotary_dim` dims.
+
+    cos/sin arrive from Qwen3_5RotaryEmbedding as (batch, seq_len, rotary_dim).
+    q/k have shape (batch, num_heads, seq_len, head_dim).
+    We unsqueeze a head dimension so cos/sin broadcast over all heads.
+    """
+    half = rotary_dim // 2
+    q_partial = q[..., :rotary_dim]   # (B, H, S, rotary_dim)
     k_partial = k[..., :rotary_dim]
 
-    # rotate_half inline
-    q1 = q_partial[..., : q_partial.shape[-1] // 2]
-    q2 = q_partial[..., q_partial.shape[-1] // 2 :]
-    k1 = k_partial[..., : k_partial.shape[-1] // 2]
-    k2 = k_partial[..., k_partial.shape[-1] // 2 :]
+    q1 = q_partial[..., :half]    # (B, H, S, half)
+    q2 = q_partial[..., half:]
+    k1 = k_partial[..., :half]
+    k2 = k_partial[..., half:]
 
-    cos_partial = cos[..., :rotary_dim]
-    sin_partial = sin[..., :rotary_dim]
+    # cos/sin: (B, S, rotary_dim) → take first half (both halves are equal) → add head dim
+    c = cos[..., :half].unsqueeze(1)  # (B, 1, S, half) — broadcasts over H
+    s = sin[..., :half].unsqueeze(1)
 
-    # cos/sin shapes: (batch, rotary_dim, seq_len) → (batch, seq_len, rotary_dim)
-    # for proper broadcasting with (batch, seq_len, features)
-    cos_partial = cos_partial.transpose(1, 2)
-    sin_partial = sin_partial.transpose(1, 2)
-
-    q_rotated = torch.cat([q1 * cos_partial - q2 * sin_partial, q1 * sin_partial + q2 * cos_partial], dim=-1)
-    k_rotated = torch.cat([k1 * cos_partial - k2 * sin_partial, k1 * sin_partial + k2 * cos_partial], dim=-1)
+    q_rotated = torch.cat([q1 * c - q2 * s, q1 * s + q2 * c], dim=-1)
+    k_rotated = torch.cat([k1 * c - k2 * s, k1 * s + k2 * c], dim=-1)
 
     # Concatenate unrotated remainder
     q_full = torch.cat([q_rotated, q[..., rotary_dim:]], dim=-1)
