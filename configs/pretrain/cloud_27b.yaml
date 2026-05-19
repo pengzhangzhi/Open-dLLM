@@ -37,7 +37,7 @@ train:
   repr_align_sub_sample_ratio: 0.25
   anchor_cache_dir: /data/anchors/qwen3.6-27b
   align_layers: "16,32,48,64"
-  freeze_layers: ""
+  freeze_layers: "visual"
   quantize_frozen: false
   optimizer: adamw
   lr: 1.0e-4
