@@ -18,6 +18,7 @@ train:
   output_dir: /data/checkpoints/qwen3.6-27b-repr-align
   data_parallel_mode: deepspeed
   ds_zero_stage: 3
+  ds_offload_optimizer: cpu
   ds_overlap_comm: true
   ds_contiguous_gradients: true
   ds_nvme_path: /data/ds_offload
