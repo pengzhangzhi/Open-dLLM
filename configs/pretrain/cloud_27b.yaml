@@ -65,4 +65,4 @@ train:
   save_time_interval_minutes: 30
   use_wandb: true
   wandb_project: open-dllm-27b
-  wandb_name: qwen3.6-27b-repr-align-cloud
+  wandb_name: repr-align-27b-run3
