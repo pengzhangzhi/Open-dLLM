@@ -145,6 +145,15 @@ class CustomizedModelingLoader(BaseModelLoader):
                 else:
                     setattr(model, "align_layers", align_layers)
 
+            # Sub-sample ratio for repr_align token loss
+            sub_sample_ratio = kwargs.get("repr_align_sub_sample_ratio")
+            if sub_sample_ratio is not None:
+                sub_sample_ratio = float(sub_sample_ratio)
+                if hasattr(model, "repr_align_sub_sample_ratio"):
+                    model.repr_align_sub_sample_ratio = sub_sample_ratio
+                else:
+                    setattr(model, "repr_align_sub_sample_ratio", sub_sample_ratio)
+
             anchor_cache_dir = kwargs.get("anchor_cache_dir")
             if anchor_cache_dir:
                 # Precomputed-anchor path: skip the deepcopy entirely, save

@@ -315,6 +315,7 @@ def main():
         config_kwargs={"tau": getattr(args.model, "tau", 0.1)} if args.model.attn_implementation == "tropical" else None,
         anchor_cache_dir=getattr(args.train, "anchor_cache_dir", None),
         align_layers=getattr(args.train, "align_layers", None),
+        repr_align_sub_sample_ratio=getattr(args.train, "repr_align_sub_sample_ratio", 1.0),
     )
     
     model_config = model.config

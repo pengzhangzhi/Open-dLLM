@@ -273,8 +273,18 @@ class TrainingArguments:
             "help": (
                 "Comma-separated layer indices to use in the repr_align cosine loss, "
                 "e.g. '6,12,18,24'. Indices are 0=embedding output, 1..N=transformer "
-                "blocks. Default None = align on ALL layers (current behaviour). "
-                "Required if anchor_cache_dir is set (cache holds only the listed layers)."
+                "blocks."
+            )
+        },
+    )
+    repr_align_sub_sample_ratio: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Fraction of valid tokens to sub-sample for the repr_align cosine loss "
+                "(1.0 = all tokens). Setting < 1.0 reduces gradient memory for the "
+                "alignment branch proportionally. E.g. 0.25 = 4× memory cut. "
+                "See docs/random_sub_sample_trick.md."
             )
         },
     )

@@ -59,6 +59,7 @@ def build_foundation_model(
     make_teacher: bool = False,
     anchor_cache_dir: Optional[str] = None,
     align_layers: Optional[str] = None,
+    repr_align_sub_sample_ratio: float = 1.0,
 ) -> "PreTrainedModel":
     """
     Builds the foundation model.
@@ -109,6 +110,7 @@ def build_foundation_model(
         make_teacher=make_teacher,
         anchor_cache_dir=anchor_cache_dir,
         align_layers=align_layers,
+        repr_align_sub_sample_ratio=repr_align_sub_sample_ratio,
     )
 
     if use_tropical:
