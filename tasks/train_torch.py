@@ -158,6 +158,22 @@ class Arguments:
     train: "TrainingArguments" = field(default_factory=TrainingArguments)
 
 
+def _prune_old_checkpoints(checkpoint_dir: str, keep: int) -> None:
+    """Delete step-based checkpoints older than the most recent `keep` ones."""
+    pattern = re.compile(r"global_step_(\d+)$")
+    entries = []
+    try:
+        for name in os.listdir(checkpoint_dir):
+            m = pattern.match(name)
+            if m:
+                entries.append((int(m.group(1)), os.path.join(checkpoint_dir, name)))
+    except FileNotFoundError:
+        return
+    entries.sort()
+    for _, path in entries[:-keep]:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def main():
     args = parse_args(Arguments)
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
@@ -656,7 +672,9 @@ def main():
                 }
                 Checkpointer.save(save_checkpoint_path, state)
                 logger.info_rank0(f"Checkpoint saved to {save_checkpoint_path}")
-                
+                if args.train.global_rank == 0 and args.train.save_total_limit > 0:
+                    _prune_old_checkpoints(args.train.save_checkpoint_path, args.train.save_total_limit)
+
                 # Barrier after checkpoint save, before evaluation
                 # This ensures all ranks have completed checkpoint before rank 0 starts eval
                 dist.barrier()
@@ -760,6 +778,8 @@ def main():
             Checkpointer.save(args.train.save_checkpoint_path, state, global_steps=global_step)
             dist.barrier()
             logger.info_rank0(f"Distributed checkpoint saved at {save_checkpoint_path} successfully!")
+            if args.train.global_rank == 0 and args.train.save_total_limit > 0:
+                _prune_old_checkpoints(args.train.save_checkpoint_path, args.train.save_total_limit)
             # save model in huggingface's format
             if args.train.global_rank == 0 and args.train.save_hf_weights and save_checkpoint_path is not None:
                 hf_weights_path = os.path.join(save_checkpoint_path, "hf_ckpt")

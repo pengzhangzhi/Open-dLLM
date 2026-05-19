@@ -4,7 +4,7 @@ model:
 
 data:
   train_path: /data/training/data_smoke_1000.jsonl
-  train_size: 1000
+  train_size: 200
   dataloader_type: native
   data_type: plaintext
   max_seq_len: 2048
@@ -55,10 +55,11 @@ train:
   empty_cache_steps: 50
   ckpt_manager: dcp
   load_checkpoint_path: ""
-  save_steps: 100
-  save_hf_weights: false
+  save_steps: 50
+  save_total_limit: 2
+  save_hf_weights: true
   auto_resume: true
   save_time_interval_minutes: 30
-  use_wandb: false
+  use_wandb: true
   wandb_project: open-dllm-27b
   wandb_name: qwen3.6-27b-repr-align-cloud

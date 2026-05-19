@@ -509,6 +509,10 @@ class TrainingArguments:
         default=True,
         metadata={"help": "Save the huggingface format weights to the last checkpoint dir."},
     )
+    save_total_limit: int = field(
+        default=0,
+        metadata={"help": "Maximum number of step-based checkpoints to keep. 0 = keep all. Oldest are deleted first."},
+    )
     freeze_layers: Optional[str] = field(
         default=None,
         metadata={"help": "Comma-separated layer patterns to freeze (e.g., 'attn,mlp'). Uses case-insensitive substring matching."},
