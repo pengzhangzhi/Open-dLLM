@@ -1,5 +1,6 @@
 import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -504,6 +505,9 @@ def main():
     logger.info(
         f"rank{args.train.local_rank} Start training, train_steps: {args.train.train_steps}, epochs: {args.train.num_train_epochs}"
     )
+    consecutive_nan_steps = 0
+    nan_abort_threshold = 3
+
     for epoch in range(start_epoch, args.train.num_train_epochs):
         if hasattr(train_dataloader, "set_epoch"):
             train_dataloader.set_epoch(epoch)
@@ -606,6 +610,32 @@ def main():
                 values = tuple(step_loss_components[name] for name in names)
                 reduced_values = all_reduce(values, group=reduce_group)
                 step_loss_components = {name: value for name, value in zip(names, reduced_values)}
+
+            # NaN abort: count consecutive NaN/Inf loss steps and abort after threshold
+            if math.isnan(total_loss) or math.isinf(total_loss):
+                consecutive_nan_steps += 1
+                comp_str = ", ".join(f"{k}={v:.4f}" for k, v in step_loss_components.items())
+                logger.warning_rank0(
+                    f"[step {global_step}] NaN/Inf loss ({consecutive_nan_steps}/{nan_abort_threshold}): "
+                    f"components=[{comp_str}] grad_norm={grad_norm:.4f}"
+                )
+                if consecutive_nan_steps >= nan_abort_threshold:
+                    # Final diagnostic: scan params for NaN before aborting
+                    nan_params = [
+                        n for n, p in list(model.named_parameters())[:50]
+                        if p.data.is_floating_point() and not torch.isfinite(p.data).all()
+                    ]
+                    logger.error_rank0(
+                        f"ABORT: {nan_abort_threshold} consecutive NaN steps. "
+                        f"NaN params (first 5): {nan_params[:5]}"
+                    )
+                    raise RuntimeError(
+                        f"Training aborted: {nan_abort_threshold} consecutive NaN/Inf loss steps "
+                        f"at global_step={global_step}. Diagnose with log above."
+                    )
+            else:
+                consecutive_nan_steps = 0
+
             torch.cuda.synchronize()
             delta_time = time.time() - start_time
             lr = max(lr_scheduler.get_last_lr())
