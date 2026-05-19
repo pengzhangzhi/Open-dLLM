@@ -990,15 +990,24 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
 
     The released checkpoint uses architecture 'Qwen3_5ForConditionalGeneration'
     and stores text weights under 'model.language_model.*'.  This class:
-      - Extracts text_config from the VL wrapper config in __init__ so the
-        text-only Qwen3_5ForCausalLM initialises correctly.
+      - Extracts text_config from the VL wrapper config and converts it to a
+        veomni Qwen3_5Config (flattening nested rope_parameters).
       - Weight-key remapping (model.language_model.* → model.*) is handled in
         load_hf_weights_zero3 (veomni/distributed/deepspeed_init.py).
     """
 
     def __init__(self, config):
-        # VL config nests text attributes under config.text_config
         text_cfg = getattr(config, "text_config", None) or config
+        if not isinstance(text_cfg, Qwen3_5Config):
+            cfg_dict = text_cfg.to_dict()
+            # Flatten nested rope_parameters into top-level attrs expected by Qwen3_5Config
+            rope_params = cfg_dict.pop("rope_parameters", {})
+            if isinstance(rope_params, dict):
+                cfg_dict.setdefault("rope_theta", rope_params.get("rope_theta", 10000000))
+                cfg_dict.setdefault("mrope_interleaved", rope_params.get("mrope_interleaved", True))
+                cfg_dict.setdefault("mrope_section", rope_params.get("mrope_section", [11, 11, 10]))
+            cfg_dict.pop("model_type", None)  # let Qwen3_5Config own its model_type
+            text_cfg = Qwen3_5Config(**cfg_dict)
         super().__init__(text_cfg)
 
 
