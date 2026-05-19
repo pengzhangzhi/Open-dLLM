@@ -27,16 +27,16 @@ model:
   attn_implementation: sdpa
 
 data:
-  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl
-  train_size: 1000
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 100000
   dataloader_type: native
   data_type: plaintext
   max_seq_len: 2048
   text_keys: text
   drop_last: true
   datasets_type: mapping
-  num_workers: 2
-  prefetch_factor: 2
+  num_workers: 4
+  prefetch_factor: 4
 
 train:
   output_dir: /home/johndpope/ds_offload/checkpoints/qwen3.6-27b-local-repr-align
