@@ -895,14 +895,18 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
         logits = None
         teacher_loss = None
 
-        # Debug: trace why loss_components might be empty
-        if dist.is_available() and dist.is_initialized() and dist.get_rank() == 0:
-            liger_ok = is_liger_kernel_available()
-            logger.warning(
-                f"[fwd dbg step] labels={'None' if labels is None else labels.shape}, "
+        # Debug: trace why loss_components might be empty (rank 0 only, limited output)
+        _rank = dist.get_rank() if dist.is_initialized() else 0
+        if _rank == 0 and not hasattr(self, "_fwd_dbg_count"):
+            self._fwd_dbg_count = 0
+        if _rank == 0 and self._fwd_dbg_count < 10:
+            self._fwd_dbg_count += 1
+            _hs_nan = not torch.isfinite(hidden_states).all().item()
+            print(
+                f"[FWD_DBG #{self._fwd_dbg_count}] labels={'None' if labels is None else labels.shape}, "
                 f"mask_ratio={'None' if mask_ratio is None else mask_ratio.shape}, "
-                f"liger={liger_ok}, "
-                f"hidden_states_nan={not torch.isfinite(hidden_states).all().item()}"
+                f"liger={is_liger_kernel_available()}, hs_nan={_hs_nan}",
+                flush=True,
             )
 
         if labels is not None:
