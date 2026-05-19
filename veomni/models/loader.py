@@ -154,6 +154,15 @@ class CustomizedModelingLoader(BaseModelLoader):
                 else:
                     setattr(model, "repr_align_sub_sample_ratio", sub_sample_ratio)
 
+            # Number of layers to randomly sample per step for repr_align loss
+            num_sample_layers = kwargs.get("repr_align_num_sample_layers")
+            if num_sample_layers is not None:
+                num_sample_layers = int(num_sample_layers)
+                if hasattr(model, "repr_align_num_sample_layers"):
+                    model.repr_align_num_sample_layers = num_sample_layers
+                else:
+                    setattr(model, "repr_align_num_sample_layers", num_sample_layers)
+
             anchor_cache_dir = kwargs.get("anchor_cache_dir")
             if anchor_cache_dir:
                 # Precomputed-anchor path: skip the deepcopy entirely, save

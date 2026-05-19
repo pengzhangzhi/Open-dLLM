@@ -837,11 +837,8 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
         # indices (0 = embedding output, 1..N = transformer blocks). Used with
         # the precomputed-anchor cache path so we don't need all 40 layers.
         self.align_layers: Optional[list[int]] = None
-        # Sub-sample ratio for repr_align token loss (1.0 = all tokens, 0.25 = 25%).
-        # Cuts gradient memory for the alignment branch ~4× with negligible convergence
-        # impact (unbiased gradient estimate via mean reduction).
-        # See docs/random_sub_sample_trick.md for details.
         self.repr_align_sub_sample_ratio: float = 1.0
+        self.repr_align_num_sample_layers: Optional[int] = None
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -1010,20 +1007,23 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                 teacher_stacked = torch.cat([h[..., :-1, :] for h in teacher_hidden_states], dim=0).permute(1, 0, 2)
                 teacher_stacked = teacher_stacked[loss_mask]
 
-                # Compute alignment loss
+                # Layer subsampling: randomly pick k of L layers each step
+                if self.repr_align_num_sample_layers is not None:
+                    num_layers = student_stacked.size(1)
+                    k = min(self.repr_align_num_sample_layers, num_layers)
+                    layer_idx = torch.randperm(num_layers, device=student_stacked.device)[:k]
+                    student_stacked = student_stacked[:, layer_idx, :]
+                    teacher_stacked = teacher_stacked[:, layer_idx, :]
+
+                # Token subsampling: randomly pick fraction of V tokens each step
                 if self.repr_align_sub_sample_ratio < 1.0:
                     num_valid = student_stacked.size(0)
                     num_sample = max(1, int(num_valid * self.repr_align_sub_sample_ratio))
-                    sample_indices = torch.randperm(num_valid, device=student_stacked.device)[:num_sample]
-                    repr_align_loss = repr_align_loss_fn(
-                        student_stacked[sample_indices],
-                        teacher_stacked[sample_indices],
-                    )
-                else:
-                    repr_align_loss = repr_align_loss_fn(
-                        student_stacked,
-                        teacher_stacked,
-                    )
+                    token_idx = torch.randperm(num_valid, device=student_stacked.device)[:num_sample]
+                    student_stacked = student_stacked[token_idx]
+                    teacher_stacked = teacher_stacked[token_idx]
+
+                repr_align_loss = repr_align_loss_fn(student_stacked, teacher_stacked)
 
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep

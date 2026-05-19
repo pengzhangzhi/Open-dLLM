@@ -283,8 +283,18 @@ class TrainingArguments:
             "help": (
                 "Fraction of valid tokens to sub-sample for the repr_align cosine loss "
                 "(1.0 = all tokens). Setting < 1.0 reduces gradient memory for the "
-                "alignment branch proportionally. E.g. 0.25 = 4× memory cut. "
-                "See docs/random_sub_sample_trick.md."
+                "alignment branch proportionally. E.g. 0.25 = 4× memory cut."
+            )
+        },
+    )
+    repr_align_num_sample_layers: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Number of layers to randomly sample per step for the repr_align cosine "
+                "loss (None = all configured layers). E.g. with align_layers='7,14,21,28' "
+                "(4 layers), setting 2 halves layer-axis gradient memory. Combine with "
+                "repr_align_sub_sample_ratio for multiplicative savings."
             )
         },
     )

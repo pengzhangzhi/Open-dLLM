@@ -751,6 +751,9 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.loss_function = causallm_loss_function
         self.teacher_model = None
+        self.align_layers: Optional[list] = None
+        self.repr_align_sub_sample_ratio: float = 1.0
+        self.repr_align_num_sample_layers: Optional[int] = None
 
         self.post_init()
 
@@ -884,12 +887,32 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
             student_hidden_states = outputs.hidden_states
             teacher_hidden_states = teacher_outputs.hidden_states
 
+            if self.align_layers is not None:
+                student_hidden_states = tuple(student_hidden_states[i] for i in self.align_layers)
+                teacher_hidden_states = tuple(teacher_hidden_states[i] for i in self.align_layers)
+
             loss_mask = (labels != IGNORE_INDEX)
             if loss_mask.any():
                 student_stacked = torch.cat([h[..., :-1, :] for h in student_hidden_states], dim=0).permute(1, 0, 2)
                 student_stacked = student_stacked[loss_mask]
                 teacher_stacked = torch.cat([h[..., :-1, :] for h in teacher_hidden_states], dim=0).permute(1, 0, 2)
                 teacher_stacked = teacher_stacked[loss_mask]
+
+                # Layer subsampling: randomly pick k of L layers each step
+                if self.repr_align_num_sample_layers is not None:
+                    num_layers = student_stacked.size(1)
+                    k = min(self.repr_align_num_sample_layers, num_layers)
+                    layer_idx = torch.randperm(num_layers, device=student_stacked.device)[:k]
+                    student_stacked = student_stacked[:, layer_idx, :]
+                    teacher_stacked = teacher_stacked[:, layer_idx, :]
+
+                # Token subsampling: randomly pick fraction of V tokens each step
+                if self.repr_align_sub_sample_ratio < 1.0:
+                    num_valid = student_stacked.size(0)
+                    num_sample = max(1, int(num_valid * self.repr_align_sub_sample_ratio))
+                    token_idx = torch.randperm(num_valid, device=student_stacked.device)[:num_sample]
+                    student_stacked = student_stacked[token_idx]
+                    teacher_stacked = teacher_stacked[token_idx]
 
                 repr_align_loss = repr_align_loss_fn(student_stacked, teacher_stacked)
 
