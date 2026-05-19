@@ -820,14 +820,13 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
         Returns:
             CausalLMOutputWithPast model output
         """
-        import sys, os as _os
+        import sys
         _r = dist.get_rank() if dist.is_initialized() else 0
         if _r == 0:
             _cnt = getattr(self, "_fwd_cnt", 0) + 1
             self._fwd_cnt = _cnt
             sys.stderr.write(f"[FWD#{_cnt}] labels={labels.shape if labels is not None else None} mask_ratio={mask_ratio.shape if mask_ratio is not None else None} liger={is_liger_kernel_available()}\n")
             sys.stderr.flush()
-            _os.fsync(sys.stderr.fileno())
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -985,6 +984,29 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
 if is_liger_kernel_available():
     Qwen3_5RMSNorm = LigerFusedLinearCrossEntropyLoss  # placeholder — liger doesn't have RMSNorm replacement for this variant
 
-ModelClass = Qwen3_5ForCausalLM
 
-__all__ = ["Qwen3_5ForCausalLM", "Qwen3_5Model", "Qwen3_5PreTrainedModel"]
+class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
+    """Registry alias for Qwen3.6-27B VL model configs.
+
+    The released checkpoint uses architecture 'Qwen3_5ForConditionalGeneration'
+    and stores text weights under 'model.language_model.*'.  This class:
+      - Extracts text_config from the VL wrapper config in __init__ so the
+        text-only Qwen3_5ForCausalLM initialises correctly.
+      - Weight-key remapping (model.language_model.* → model.*) is handled in
+        load_hf_weights_zero3 (veomni/distributed/deepspeed_init.py).
+    """
+
+    def __init__(self, config):
+        # VL config nests text attributes under config.text_config
+        text_cfg = getattr(config, "text_config", None) or config
+        super().__init__(text_cfg)
+
+
+ModelClass = [Qwen3_5ForCausalLM, Qwen3_5ForConditionalGeneration]
+
+__all__ = [
+    "Qwen3_5ForCausalLM",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5Model",
+    "Qwen3_5PreTrainedModel",
+]

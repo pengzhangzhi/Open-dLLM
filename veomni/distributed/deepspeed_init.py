@@ -143,6 +143,16 @@ def load_hf_weights_zero3(model: "torch.nn.Module", weights_path: str) -> None:
 
     param_dict = dict(model.named_parameters())
 
+    def _remap_key(skey: str) -> str:
+        """Map VL-model safetensors key → veomni text-model parameter name.
+
+        Released Qwen3.6-27B weights store the language-model parameters under
+        'model.language_model.*', but veomni's Qwen3_5ForCausalLM uses 'model.*'.
+        """
+        if skey.startswith("model.language_model."):
+            return skey.replace("model.language_model.", "model.", 1)
+        return skey
+
     if weight_map is None:
         shard_weights = load_file(single_file) if dist.get_rank() == 0 else {}
         for name, param in param_dict.items():
@@ -163,9 +173,10 @@ def load_hf_weights_zero3(model: "torch.nn.Module", weights_path: str) -> None:
         if dist.get_rank() == 0:
             shard_weights = load_file(os.path.join(weights_path, fname))
         for pname in pnames:
-            if pname not in param_dict:
+            model_pname = _remap_key(pname)
+            if model_pname not in param_dict:
                 continue
-            param = param_dict[pname]
+            param = param_dict[model_pname]
             with deepspeed.zero.GatheredParameters(param, modifier_rank=0):
                 if dist.get_rank() == 0 and pname in shard_weights:
                     param.data.copy_(shard_weights[pname].to(dtype=param.dtype))
