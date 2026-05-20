@@ -64,10 +64,9 @@ train:
   enable_full_determinism: false
   empty_cache_steps: 50
 
-  # DeepSpeech: ZeRO-2, NO optimizer offload (PersistentSparseAdam handles it)
+  # DeepSpeech: ZeRO-2, no optimizer offload (PersistentSparseAdam handles it)
   data_parallel_mode: deepspeed
   ds_zero_stage: 2
-  ds_offload_optimizer: null
 
   ckpt_manager: dcp
   load_checkpoint_path: ""
