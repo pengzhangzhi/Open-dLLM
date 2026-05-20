@@ -621,21 +621,23 @@ def main():
                     for name, value in loss_components.items():
                         step_loss_components[name] = step_loss_components.get(name, 0.0) + value / len(micro_batches)
 
-                    # Log loss breakdown when NaN detected
-                    if not torch.isfinite(loss_tensor) and args.train.local_rank == 0:
+                    step_has_nan = not torch.isfinite(loss_tensor)
+                    if step_has_nan and args.train.local_rank == 0:
                         comp_str = ", ".join(f"{k}={v:.4f}" for k, v in loss_components.items())
                         logger.warning_rank0(
                             f"[step {global_step}] NaN loss detected. raw_loss={outputs.loss.mean():.4f} components=[{comp_str}]"
                         )
 
-                with model_bwd_context:
-                    if ds_engine is not None:
-                        ds_engine.backward(loss_tensor)
-                    else:
-                        loss_tensor.backward()
+                if not step_has_nan:
+                    with model_bwd_context:
+                        if ds_engine is not None:
+                            ds_engine.backward(loss_tensor)
+                        else:
+                            loss_tensor.backward()
+                else:
+                    logger.warning_rank0(f"[step {global_step}] Skipping backward for NaN loss")
 
-                # Gradient NaN scan after backward (first occurrence only)
-                if global_step <= 3 and args.train.local_rank == 0:
+                if not step_has_nan and global_step <= 3 and args.train.local_rank == 0:
                     nan_grads = [
                         n for n, p in model.named_parameters()
                         if p.grad is not None and not torch.isfinite(p.grad).all()
@@ -647,8 +649,38 @@ def main():
                     else:
                         logger.info_rank0(f"[step {global_step}] All gradients finite after backward")
 
-                total_loss += loss_tensor.item()
+                if step_has_nan:
+                    total_loss += 0.0
+                else:
+                    total_loss += loss_tensor.item()
                 del micro_batch
+
+            step_had_nan = math.isnan(total_loss) or math.isinf(total_loss)
+            if step_had_nan:
+                if ds_engine is None:
+                    optimizer.zero_grad()
+                consecutive_nan_steps += 1
+                logger.warning_rank0(
+                    f"[step {global_step}] NaN/Inf loss ({consecutive_nan_steps}/{nan_abort_threshold}): "
+                    f"skipping optimizer step"
+                )
+                if consecutive_nan_steps >= nan_abort_threshold:
+                    nan_params = [
+                        n for n, p in list(model.named_parameters())[:50]
+                        if p.data.is_floating_point() and not torch.isfinite(p.data).all()
+                    ]
+                    logger.warning_rank0(
+                        f"ABORT: {nan_abort_threshold} consecutive NaN steps. "
+                        f"NaN params (first 5): {nan_params[:5]}"
+                    )
+                    raise RuntimeError(
+                        f"Training aborted: {nan_abort_threshold} consecutive NaN/Inf loss steps "
+                        f"at global_step={global_step}."
+                    )
+                data_loader_tqdm.update()
+                continue
+
+            consecutive_nan_steps = 0
 
             qlora_lora_gnorm = 0.0
             qlora_lora_pnorm = 0.0
@@ -685,31 +717,6 @@ def main():
                 if not isinstance(reduced_values, (tuple, list)):
                     reduced_values = (reduced_values,)
                 step_loss_components = {name: value for name, value in zip(names, reduced_values)}
-
-            # NaN abort: count consecutive NaN/Inf loss steps and abort after threshold
-            if math.isnan(total_loss) or math.isinf(total_loss):
-                consecutive_nan_steps += 1
-                comp_str = ", ".join(f"{k}={v:.4f}" for k, v in step_loss_components.items())
-                logger.warning_rank0(
-                    f"[step {global_step}] NaN/Inf loss ({consecutive_nan_steps}/{nan_abort_threshold}): "
-                    f"components=[{comp_str}] grad_norm={grad_norm:.4f}"
-                )
-                if consecutive_nan_steps >= nan_abort_threshold:
-                    # Final diagnostic: scan params for NaN before aborting
-                    nan_params = [
-                        n for n, p in list(model.named_parameters())[:50]
-                        if p.data.is_floating_point() and not torch.isfinite(p.data).all()
-                    ]
-                    logger.warning_rank0(
-                        f"ABORT: {nan_abort_threshold} consecutive NaN steps. "
-                        f"NaN params (first 5): {nan_params[:5]}"
-                    )
-                    raise RuntimeError(
-                        f"Training aborted: {nan_abort_threshold} consecutive NaN/Inf loss steps "
-                        f"at global_step={global_step}. Diagnose with log above."
-                    )
-            else:
-                consecutive_nan_steps = 0
 
             torch.cuda.synchronize()
             delta_time = time.time() - start_time

@@ -66,7 +66,7 @@ class VFMNoiseAdapter(nn.Module):
         # Expand prompt embeddings to cover generation slots
         # For generation positions, use learnable query or zero init
         gen_queries = torch.zeros(B, G, D, device=prompt_embeds.device, dtype=prompt_embeds.dtype)
-        x = torch.cat([prompt_embeds, gen_queries], dim=1)  # [B, P+G, D]
+        x = torch.cat([prompt_embeds, gen_queries], dim=1)
 
         # Add positional embeddings
         positions = torch.arange(P + G, device=x.device).unsqueeze(0)
@@ -131,20 +131,10 @@ class VFMFlowMapWrapper(nn.Module):
         )
 
     def forward(self, z: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
-        """
-        Args:
-            z: [B, L, D] — continuous noise/embedding state
-            attention_mask: [B, L] — 1 for real positions
-
-        Returns:
-            logits: [B, L, V] — vocab logits
-            hidden_states: [B, L, D] — last layer hidden states (for data loss)
-        """
         x = self.input_proj(z)
         outputs = self.model(
             inputs_embeds=x,
             attention_mask=attention_mask,
-            is_causal=False,
             use_cache=False,
             output_hidden_states=True,
         )
@@ -252,7 +242,7 @@ class VariationalFlowMap(nn.Module):
             gen_pos = gen_mask[b].nonzero(as_tuple=True)[0]
             if len(gen_pos) > 0:
                 gp_len = min(len(gen_pos), z_gen.shape[1])
-                z_full[b, gen_pos[:gp_len]] = z_gen[b, :gp_len]
+                z_full[b, gen_pos[:gp_len]] = z_gen[b, :gp_len].to(z_full.dtype)
 
         # Mix: with probability alpha use adapter noise, else pure N(0,I)
         if self.alpha < 1.0 and self.training:
@@ -274,11 +264,11 @@ class VariationalFlowMap(nn.Module):
         # L_obs: observation consistency — prompt tokens should be preserved
         # Use cross-entropy on prompt positions
         if prompt_mask.sum() > 0:
-            prompt_logits = logits[:, :-1, :][prompt_mask[:, 1:].bool()]
-            prompt_targets = input_ids[:, 1:][prompt_mask[:, 1:].bool()]
+            prompt_logits = logits[prompt_mask.bool()]
+            prompt_targets = input_ids[prompt_mask.bool()]
             obs_loss = F.cross_entropy(prompt_logits, prompt_targets)
         else:
-            obs_loss = torch.tensor(0.0, device=input_ids.device)
+            obs_loss = torch.tensor(0.0, device=input_ids.device, dtype=logits.dtype)
 
         # L_KL: KL divergence of noise adapter
         # Only count KL for generation positions

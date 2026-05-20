@@ -103,6 +103,10 @@ class ModelArguments:
         default_factory=dict,
         metadata={"help": "LDLM configuration (autoencoder, diffusion head, sampler)."},
     )
+    vfm: Dict[str, Any] = field(
+        default_factory=dict,
+        metadata={"help": "VFM configuration (adapter_layers, adapter_heads, tau, sigma, alpha, freeze_base)."},
+    )
 
     def __post_init__(self):
         if self.config_path is None and self.model_path is None:
