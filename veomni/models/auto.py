@@ -62,6 +62,8 @@ def build_foundation_model(
     repr_align_sub_sample_ratio: float = 1.0,
     repr_align_num_sample_layers: Optional[int] = None,
     enable_nvfp4_qat: bool = False,
+    enable_qlorafy: bool = False,
+    qlorafy_config: Optional[Dict] = None,
 ) -> "PreTrainedModel":
     """
     Builds the foundation model.
@@ -70,6 +72,50 @@ def build_foundation_model(
     """
     if config_kwargs is None:
         config_kwargs = {}
+
+    # "tropical" is not a registered HF attn_implementation; load with "eager" then post-patch.
+    use_tropical = attn_implementation == "tropical"
+    load_attn_impl = "eager" if use_tropical else attn_implementation
+
+    # ── QLoRA path: 4-bit NF4 + LoRA adapters (bypasses normal loading) ──
+    if enable_qlorafy:
+        from .qlorafy import QLoRAConfig, build_qlorafied_model
+
+        qcfg = QLoRAConfig(**(qlorafy_config or {}))
+        logger.info_rank0(
+            f"Loading model via QLoRA: NF4 base + LoRA (r={qcfg.r}, "
+            f"targets={'/'.join(qcfg.target_modules or [])})"
+        )
+        model = build_qlorafied_model(
+            model_path=weights_path or config_path,
+            config=qcfg,
+            torch_dtype=getattr(torch, torch_dtype),
+            trust_remote_code=True,
+        )
+
+        # Parse align_layers for Repr-Align (same as normal path does)
+        align_layers_str = align_layers
+        if align_layers_str:
+            parsed = sorted({int(x) for x in align_layers_str.split(",") if x.strip()})
+            if hasattr(model, "align_layers"):
+                model.align_layers = parsed
+            else:
+                setattr(model, "align_layers", parsed)
+
+        if anchor_cache_dir:
+            from .cached_teacher import CachedTeacher
+
+            cfg = model.config
+            model.teacher_model = CachedTeacher(
+                cache_dir=anchor_cache_dir,
+                num_hidden_layers=cfg.num_hidden_layers,
+                hidden_size=cfg.hidden_size,
+            )
+            logger.info_rank0(f"[QLaRA] CachedTeacher from {anchor_cache_dir}")
+
+        if use_tropical:
+            model.config._attn_implementation = "tropical"
+        return model
 
     if moe_implementation is not None:
         config_kwargs["_moe_implementation"] = moe_implementation

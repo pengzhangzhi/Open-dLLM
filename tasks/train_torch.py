@@ -322,6 +322,8 @@ def main():
         repr_align_sub_sample_ratio=getattr(args.train, "repr_align_sub_sample_ratio", 1.0),
         repr_align_num_sample_layers=getattr(args.train, "repr_align_num_sample_layers", None),
         enable_nvfp4_qat=getattr(args.model, "enable_nvfp4_qat", False),
+        enable_qlorafy=getattr(args.model, "enable_qlorafy", False),
+        qlorafy_config=getattr(args.model, "qlorafy_config", None),
     )
 
     model_config = model.config

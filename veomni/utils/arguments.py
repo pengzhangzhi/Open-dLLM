@@ -91,6 +91,14 @@ class ModelArguments:
         default=False,
         metadata={"help": "Enable NVFP4 quantization-aware training (Blackwell 4-bit). Replaces nn.Linear with NVFP4FakeQuantizedLinear."},
     )
+    enable_qlorafy: bool = field(
+        default=False,
+        metadata={"help": "Enable QLoRA: 4-bit NF4 base + LoRA adapters. Dramatically reduces VRAM for training."},
+    )
+    qlorafy_config: Optional[Dict[str, Any]] = field(
+        default_factory=dict,
+        metadata={"help": "QLoRA config dict (r, lora_alpha, target_modules, etc.). See veomni.models.qlorafy.QLoRAConfig."},
+    )
     ldlm: Dict[str, Any] = field(
         default_factory=dict,
         metadata={"help": "LDLM configuration (autoencoder, diffusion head, sampler)."},
