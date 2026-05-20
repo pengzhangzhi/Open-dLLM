@@ -493,7 +493,7 @@ Randomly sample k of L configured `align_layers` each step. Over training all la
 **Combined example — 8× alignment branch memory reduction:**
 ```yaml
 train:
-  align_layers: "16,32,48,63"         # evenly spaced across 64-layer 27B stack
+  align_layers: "16,32,48,64"         # evenly spaced across 64-layer 27B stack
   repr_align_num_sample_layers: 2     # 2× layer savings
   repr_align_sub_sample_ratio: 0.25   # 4× token savings
   # combined: 8× reduction on alignment gradient memory
@@ -502,4 +502,4 @@ train:
 
 **Layer index convention — don't reuse 1.7B indices for 27B:**
 - 1.7B (28 layers): `align_layers: "7,14,21,28"` — evenly spaced
-- 27B (64 layers): `align_layers: "16,32,48,63"` — evenly spaced; `"7,14,21,28"` only covers first 43% of depth
+- 27B (64 layers): `align_layers: "16,32,48,64"` — evenly spaced (64 → `layers[63]`, the last layer); `"7,14,21,28"` only covers first 43% of depth
