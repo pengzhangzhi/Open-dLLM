@@ -321,6 +321,7 @@ def main():
         align_layers=getattr(args.train, "align_layers", None),
         repr_align_sub_sample_ratio=getattr(args.train, "repr_align_sub_sample_ratio", 1.0),
         repr_align_num_sample_layers=getattr(args.train, "repr_align_num_sample_layers", None),
+        enable_nvfp4_qat=getattr(args.model, "enable_nvfp4_qat", False),
     )
 
     model_config = model.config

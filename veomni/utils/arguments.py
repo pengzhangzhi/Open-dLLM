@@ -87,6 +87,10 @@ class ModelArguments:
         default_factory=list,
         metadata={"help": "Basic modules beyond model._no_split_modules to be sharded in FSDP."},
     )
+    enable_nvfp4_qat: bool = field(
+        default=False,
+        metadata={"help": "Enable NVFP4 quantization-aware training (Blackwell 4-bit). Replaces nn.Linear with NVFP4FakeQuantizedLinear."},
+    )
     ldlm: Dict[str, Any] = field(
         default_factory=dict,
         metadata={"help": "LDLM configuration (autoencoder, diffusion head, sampler)."},

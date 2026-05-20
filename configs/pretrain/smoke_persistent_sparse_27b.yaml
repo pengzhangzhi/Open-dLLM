@@ -1,0 +1,84 @@
+# PersistentSparseAdam smoke test — Qwen3.6-27B, 5 steps
+#
+# ZeRO-3 + CPU param offload + PersistentSparseAdam (DS also offloads
+# optimizer states to CPU — our rotation still runs but doesn't save
+# additional GPU VRAM because DS already pins everything to CPU).
+#
+# Launch (single GPU, 5090 for max VRAM):
+#   CUDA_VISIBLE_DEVICES=1 DS_SKIP_CUDA_CHECK=1 \
+#       .venv/bin/torchrun --nproc_per_node=1 \
+#       tasks/train_torch.py configs/pretrain/smoke_persistent_sparse_27b.yaml
+
+model:
+  model_path: /home/johndpope/ds_offload/models/Qwen3.6-27B
+  attn_implementation: sdpa
+
+data:
+  train_path: /tmp/smoke_20.jsonl
+  train_size: 20
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/persistent-sparse-27b-smoke
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 3
+  ds_offload_optimizer: cpu      # DS offloads optimizer states to CPU
+  ds_offload_param: cpu          # DS offloads model params to CPU
+  ds_overlap_comm: true
+  ds_contiguous_gradients: true
+  ds_nvme_path: /home/johndpope/ds_offload
+
+  ulysses_parallel_size: 1
+  expert_parallel_size: 1
+  global_batch_size: 2
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align — 4 evenly-spaced layers out of 64
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-27b
+  align_layers: "16,32,48,64"
+  repr_align_sub_sample_ratio: 0.25
+
+  # PersistentSparseAdam — 25% of params keep full fp32 states on GPU
+  optimizer: persistent_sparse_adam
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  enable_full_determinism: false
+  empty_cache_steps: 5
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_total_limit: 1
+  save_hf_weights: false
+  save_epochs: 0
+  auto_resume: false
+  save_time_interval_minutes: 0
+
+  use_wandb: false
+
+  max_steps: 5

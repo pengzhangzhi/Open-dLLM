@@ -61,6 +61,7 @@ def build_foundation_model(
     align_layers: Optional[str] = None,
     repr_align_sub_sample_ratio: float = 1.0,
     repr_align_num_sample_layers: Optional[int] = None,
+    enable_nvfp4_qat: bool = False,
 ) -> "PreTrainedModel":
     """
     Builds the foundation model.
@@ -120,5 +121,24 @@ def build_foundation_model(
         logger.info_rank0("Patched model with tropical attention (τ={})".format(
             getattr(model.config, "tau", 0.1)
         ))
+
+    if enable_nvfp4_qat:
+        try:
+            from .nvfp4_qat import apply_nvfp4_qat_prepare, estimate_nvfp4_memory_savings
+
+            logger.info_rank0("Applying NVFP4 QAT prepare — replacing nn.Linear with NVFP4FakeQuantizedLinear")
+            apply_nvfp4_qat_prepare(model)
+            savings = estimate_nvfp4_memory_savings(model)
+            logger.info_rank0(
+                f"NVFP4 QAT memory estimate: "
+                f"{savings['param_bytes_before'] / 1e9:.1f} GB → "
+                f"{savings['param_bytes_after'] / 1e9:.1f} GB "
+                f"({savings['reduction_ratio']:.1f}× reduction)"
+            )
+        except ImportError as e:
+            logger.warning_rank0(
+                f"nvfp4_qat import failed ({e}). Install torchao nightly:\n"
+                "  pip install --pre torch torchao mslk --index-url https://download.pytorch.org/whl/nightly/cu130"
+            )
 
     return model

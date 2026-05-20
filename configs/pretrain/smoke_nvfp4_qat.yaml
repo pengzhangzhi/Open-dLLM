@@ -1,18 +1,21 @@
-# PersistentSparseAdam smoke test — Qwen3-1.7B, 5 steps
+# NVFP4 QAT + PersistentSparseAdam smoke test — Qwen3-1.7B, 5 steps
 #
-# Key differences from the baseline smoke config:
-#   1. optimizer: persistent_sparse_adam  (instead of adamw)
-#   2. ds_offload_optimizer: null  (let our custom rotation manage offloading)
-#   3. Uses ZeRO-2 for basic sharding but no DS-level optimizer offload
+# Combines two VRAM-saving techniques:
+#   1. NVFP4 QAT — stores weights in 4-bit floating point during training
+#      (4× reduction on model weight memory)
+#   2. PersistentSparseAdam — keeps only 25% of optimizer states on GPU
+#      (4× reduction on optimizer state memory)
+#
+# Requires: torch nightly + torchao nightly (CUDA 13.0, Blackwell)
 #
 # Launch:
 #   CUDA_VISIBLE_DEVICES=0 .venv/bin/torchrun --nproc_per_node=1 \
-#       tasks/train_torch.py \
-#       configs/pretrain/smoke_persistent_sparse.yaml
+#       tasks/train_torch.py configs/pretrain/smoke_nvfp4_qat.yaml
 
 model:
   model_path: Qwen/Qwen3-1.7B
   attn_implementation: sdpa
+  enable_nvfp4_qat: true          # Replace nn.Linear with NVFP4FakeQuantizedLinear
 
 data:
   train_path: /tmp/smoke_20.jsonl
@@ -27,7 +30,7 @@ data:
   prefetch_factor: 2
 
 train:
-  output_dir: /home/johndpope/ds_offload/checkpoints/persistent-sparse-smoke
+  output_dir: /home/johndpope/ds_offload/checkpoints/nvfp4-qat-smoke
   ulysses_parallel_size: 1
   global_batch_size: 2
   micro_batch_size: 1
@@ -45,7 +48,7 @@ train:
   repr_align_num_sample_layers: 4
   repr_align_sub_sample_ratio: 0.25
 
-  # Optimisation — use PersistentSparseAdam
+  # PersistentSparseAdam — 25% optimizer state subset
   optimizer: persistent_sparse_adam
   lr: 1.0e-4
   lr_warmup_ratio: 0.01
@@ -64,10 +67,9 @@ train:
   enable_full_determinism: false
   empty_cache_steps: 50
 
-  # DeepSpeech: ZeRO-2, no optimizer offload (PersistentSparseAdam handles it)
-  data_parallel_mode: deepspeed
-  ds_zero_stage: 2
-  # ds_offload_optimizer omitted — defaults to None (PersistentSparseAdam handles rotation)
+  # DDP — no DeepSpeed overhead
+  data_parallel_mode: ddp
+
   ckpt_manager: dcp
   load_checkpoint_path: ""
   save_steps: 100
