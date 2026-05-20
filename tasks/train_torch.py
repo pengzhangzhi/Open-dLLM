@@ -258,6 +258,29 @@ def main():
             train_dataset = build_mapping_dataset(args.data.train_path, transform=transform)
             args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, len(train_dataset))
 
+        eval_dataloader = None
+        if args.data.eval_size > 0 and args.data.datasets_type == "mapping":
+            from veomni.data.data_collator import DataCollatorWithPadding
+            full_dataset = train_dataset
+            n_total = len(full_dataset)
+            n_eval = min(args.data.eval_size, max(1, n_total // 10))
+            n_train = n_total - n_eval
+            if n_train <= 0:
+                logger.warning_rank0(f"eval_size={args.data.eval_size} >= dataset size={n_total}, skipping eval split")
+            else:
+                train_dataset = torch.utils.data.Subset(full_dataset, range(n_train))
+                eval_subset = torch.utils.data.Subset(full_dataset, range(n_train, n_total))
+                eval_collate = DataCollatorWithPadding(pad_token_id=tokenizer.pad_token_id or 0)
+                eval_dataloader = torch.utils.data.DataLoader(
+                    eval_subset,
+                    batch_size=args.train.micro_batch_size,
+                    shuffle=False,
+                    num_workers=min(args.data.num_workers, 2),
+                    pin_memory=True,
+                    collate_fn=eval_collate,
+                )
+                logger.info_rank0(f"Eval split: {n_eval} examples held out from {n_total} total")
+
         train_dataloader = build_dataloader(
             dataset=train_dataset,
             micro_batch_size=args.train.micro_batch_size,
@@ -281,6 +304,30 @@ def main():
         )
     else:
         raise NotImplementedError(f"Unsupported dataloader type: {args.data.dataloader_type}.")
+
+    eval_dataloader = None
+
+    def run_eval(model, eval_dataloader, tokenizer, args, max_batches=20):
+        model.eval()
+        total_loss = 0.0
+        total_tokens = 0
+        with torch.no_grad():
+            for i, batch in enumerate(eval_dataloader):
+                if i >= max_batches:
+                    break
+                batch = {k: v.cuda(non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                outputs = model(**batch, use_cache=False, repr_align_wt=0.0)
+                loss = outputs.loss
+                if torch.isfinite(loss):
+                    n_tokens = batch.get("attention_mask", batch.get("input_ids")).sum().item()
+                    total_loss += loss.item() * n_tokens
+                    total_tokens += n_tokens
+        model.train()
+        if total_tokens == 0:
+            return None, None
+        avg_loss = total_loss / total_tokens
+        perplexity = math.exp(min(avg_loss, 20))
+        return avg_loss, perplexity
 
     logger.info_rank0("Prepare model")
     # Enter ZeRO-3 Init context BEFORE model creation so DeepSpeed partitions each
@@ -768,6 +815,16 @@ def main():
                             logger.warning_rank0(f"[step {global_step}] Generation probe failed: {e}")
 
                     wandb.log(train_metrics, step=global_step)
+
+                if eval_dataloader is not None and args.train.eval_every > 0 and global_step % args.train.eval_every == 0 and global_step > 0:
+                    try:
+                        eval_loss, eval_ppl = run_eval(model, eval_dataloader, tokenizer, args)
+                        if eval_loss is not None and args.train.global_rank == 0:
+                            logger.info_rank0(f"[step {global_step}] eval loss={eval_loss:.4f} ppl={eval_ppl:.2f}")
+                            if args.train.use_wandb:
+                                wandb.log({"eval/loss": eval_loss, "eval/perplexity": eval_ppl}, step=global_step)
+                    except Exception as e:
+                        logger.warning_rank0(f"[step {global_step}] Eval failed: {e}")
 
                 if args.train.enable_profiling and global_step <= args.train.profile_end_step:
                     profiler.step()

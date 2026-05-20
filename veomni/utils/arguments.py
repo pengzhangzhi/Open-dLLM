@@ -146,6 +146,10 @@ class DataArguments:
         default=10_000_000,
         metadata={"help": "Number of tokens for training to compute training steps for dynamic batch dataloader."},
     )
+    eval_size: int = field(
+        default=0,
+        metadata={"help": "Number of examples to hold out for perplexity eval. 0 = no eval."},
+    )
     data_type: Literal["plaintext", "conversation"] = field(
         default="conversation",
         metadata={"help": "Type of the training data."},

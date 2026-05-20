@@ -5,20 +5,6 @@
 **Config:** `configs/pretrain/qlorafy_27b_train.yaml`  
 **Hardware:** 1× RTX 5090 (32 GB), CUDA_VISIBLE_DEVICES=0
 
----
-
-## Metrics That Are Now Working (Fixed This Session)
-
-| Metric | Before Fix | After Fix | Value @ Step 19 |
-|---|---|---|---|
-| `qlora/grad_norm` | **0** (optimizer.zero_grad cleared grads before read) | Captured pre-zero_grad | 2.40 |
-| `flops_achieved(T)` | **0** (no estimator for `qwen3_5_text`) | Added `qwen3_5_text` estimator | 62 TFLOPS |
-| `flops_promised(T)` | **Infinity** (RTX 5090 not in device table) | Added RTX 5090/Blackwell entries | 335 TFLOPS |
-| `tokens_per_second` | **0.0004M** (divided by 1e6, showed raw as "M") | Raw tok/s, no /1e6 | 440 tok/s |
-| `mfu` | **0** (derived from 0/Infinity) | 62/335 = 19% | 0.19 |
-| wandb step counter | **Stuck at 64** (auto-resume from dead run) | Only `resume="allow"` when checkpoint exists | Monotonic 1→23 |
-
----
 
 ## Current Run Metrics (Steps 1–19)
 
@@ -45,7 +31,7 @@ step  loss   grad_norm  qlora_gn  tok/s  mfu   flops_achieved
 
 1. QLoRA + Repr-Align forward/backward works on 27B with text-only `Qwen3_5ForCausalLM`
 2. Gradients are finite, loss is decreasing, no systematic NaN
-3. Single-GPU 32 GB fits 27B NF4 + LoRA r=16 training
+3. Single-GPU 32 GB fits 27B NF4 + LoRA r=32 training
 4. Wandb logging captures real metrics (after fixes)
 5. Text-only model class saves ~4.8 GB by not instantiating the vision encoder
 

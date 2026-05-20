@@ -34,6 +34,7 @@ model:
 data:
   train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
   train_size: 1000
+  eval_size: 50
   dataloader_type: native
   data_type: plaintext
   max_seq_len: 1024
@@ -83,6 +84,7 @@ train:
   ckpt_manager: dcp
   load_checkpoint_path: ""
   save_steps: 500
+  eval_every: 100
   save_epochs: 0
   save_hf_weights: true
   auto_resume: true
@@ -90,6 +92,6 @@ train:
 
   use_wandb: true
   wandb_project: open-dllm
-  wandb_name: qlorafy-27b-r32
+  wandb_name: qlorafy-27b-r32-eval
 
   max_steps: 2000
