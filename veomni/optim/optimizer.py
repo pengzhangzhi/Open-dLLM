@@ -24,6 +24,7 @@ from torch.optim import AdamW
 from torch.optim.optimizer import Optimizer
 
 from ..utils.import_utils import is_torch_npu_available
+from .persistent_sparse_adam import PersistentSparseAdam
 
 
 class SCALE(torch.optim.Optimizer):
@@ -539,7 +540,15 @@ def build_optimizer(
             adamw_betas=betas,
             adamw_eps=eps,
         )
+    elif optimizer_type == "persistent_sparse_adam":
+        optim = PersistentSparseAdam(
+            param_groups,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+        )
     else:
-        raise ValueError("Only adamw, anyprecision_adamw, apollo, galore, and scale are supported as optimizers.")
+        raise ValueError("Only adamw, adamw_8bit, anyprecision_adamw, apollo, galore, scale, and persistent_sparse_adam are supported as optimizers.")
 
     return optim

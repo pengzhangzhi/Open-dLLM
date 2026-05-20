@@ -218,7 +218,7 @@ class TrainingArguments:
         default=0,
         metadata={"help": "L2 regularization strength."},
     )
-    optimizer: Literal["adamw", "anyprecision_adamw", "apollo", "galore", "scale"] = field(
+    optimizer: Literal["adamw", "anyprecision_adamw", "apollo", "galore", "scale", "persistent_sparse_adam"] = field(
         default="adamw",
         metadata={"help": "Optimizer. Default to adamw."},
     )
