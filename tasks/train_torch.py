@@ -737,6 +737,31 @@ def main():
                         except Exception:
                             pass
 
+                    if args.model.enable_qlorafy and global_step % 100 == 0:
+                        try:
+                            from veomni.models.transformers.qwen2.generation_utils import MDMGenerationConfig
+                            model.eval()
+                            prompt = "The meaning of life is"
+                            enc = tokenizer(prompt, return_tensors="pt")
+                            pids = enc.input_ids.to(model.device if hasattr(model, 'device') else next(model.parameters()).device)
+                            gen_cfg = MDMGenerationConfig(
+                                mask_token_id=tokenizer.mask_token_id,
+                                pad_token_id=tokenizer.pad_token_id,
+                                eos_token_id=tokenizer.eos_token_id,
+                                max_new_tokens=32, steps=32,
+                                temperature=0.5, top_k=200, alg="p2", alg_temp=0.5,
+                                num_return_sequences=1, return_dict_in_generate=True,
+                            )
+                            with torch.no_grad():
+                                out = model.diffusion_generate(inputs=pids, generation_config=gen_cfg)
+                            gen_text = tokenizer.decode(out.sequences[0][pids.shape[1]:], skip_special_tokens=True)
+                            train_metrics["generation/sample"] = wandb.Html(
+                                f"<b>Prompt:</b> {prompt}<br><b>Generated:</b> {gen_text}"
+                            )
+                            model.train()
+                        except Exception as e:
+                            logger.warning_rank0(f"[step {global_step}] Generation probe failed: {e}")
+
                     wandb.log(train_metrics, step=global_step)
 
                 if args.train.enable_profiling and global_step <= args.train.profile_end_step:
