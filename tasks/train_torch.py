@@ -552,8 +552,8 @@ def main():
             torch.cuda.synchronize()
             start_time = time.time()
 
-            # NaN param check: scan first 5 params before forward on step > 1
-            if global_step > 1 and args.train.local_rank == 0:
+            # NaN param check: skip for quantized models (NF4 params are uint8, never NaN)
+            if global_step > 1 and args.train.local_rank == 0 and not getattr(args.model, "enable_qlorafy", False):
                 nan_params = [
                     n for n, p in list(model.named_parameters())[:20]
                     if p.data.is_floating_point() and not torch.isfinite(p.data).all()
