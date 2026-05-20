@@ -326,6 +326,81 @@ torchrun --nproc_per_node=2 tasks/train_torch.py \
   --train.save_steps=500
 ```
 
+### Repr-Align: Layer + Token Subsampling (Memory Optimization)
+
+Repr-Align alignment loss scales with the number of layers and sequence length — at 27B with 64 layers and long sequences, computing cosine similarity for every layer every step becomes non-trivial. Two independent knobs reduce this cost.
+
+**What the knobs do:**
+
+| Knob | YAML field | Effect |
+|------|-----------|--------|
+| Token subsampling | `repr_align_sub_sample_ratio: 0.25` | Random 25% of positions each step → 4× fewer alignment gradient tokens |
+| Layer subsampling | `repr_align_num_sample_layers: 4` | Random 4 of N configured layers each step → N/4 fewer alignment losses |
+
+Both are unbiased gradient estimates — every position/layer is covered over time. The hook-based implementation (not `output_hidden_states=True`) means gradient checkpointing is preserved for non-alignment layers.
+
+**Validated setup — all layers in pool, subsampled:**
+
+```bash
+# Step 1: precompute anchor cache for all 28 layers, 20-example smoke set
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/precompute_anchor.py \
+    --model_path Qwen/Qwen3-1.7B \
+    --data_path /tmp/smoke_20.jsonl \
+    --output_dir /home/johndpope/ds_offload/anchors/qwen3-1.7b-all28-smoke20 \
+    --layers 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28 \
+    --max_seq_len 2048
+# → 20 chunks, 1 GB, ~1s
+
+# Step 2: run training smoke test (5 steps)
+CUDA_VISIBLE_DEVICES=0 .venv/bin/torchrun --nproc_per_node=1 \
+    tasks/train_torch.py \
+    configs/pretrain/qwen3_1_7b_alllayers_subsample_smoke.yaml
+```
+
+Config (`configs/pretrain/qwen3_1_7b_alllayers_subsample_smoke.yaml`):
+```yaml
+train:
+  align_layers: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28"
+  repr_align_num_sample_layers: 4    # 4 of 28 sampled each step
+  repr_align_sub_sample_ratio: 0.25  # 25% of tokens
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 2
+  ds_offload_optimizer: cpu
+  optimizer: adamw
+  enable_gradient_checkpointing: true
+```
+
+**Measured results — Qwen3-1.7B, RTX 5090, 5 steps:**
+
+| Step | loss | repr_align | grad_norm |
+|------|------|-----------|-----------|
+| 1 | 13.12 | 0.56 | 0.00 |
+| 2 | 13.19 | 0.62 | 127.02 |
+| 3 | 11.88 | 0.72 | 177.57 |
+| 4 | 11.69 | 0.63 | 177.57 |
+| 5 | 8.66 | 0.52 | 177.57 |
+
+| Config | Peak VRAM |
+|--------|-----------|
+| All 28 layers, sample 4, ratio 0.25 | **9.34 GB** |
+| Alignment OFF (baseline) | **9.34 GB** |
+
+**Finding: at 1.7B scale, the subsampling is effectively free.** The alignment tensors (4 layers × ~500 tokens × 2048 hidden × bf16 ≈ 8 MB) are negligible against the 9+ GB model + optimizer footprint. No measurable VRAM difference.
+
+**Where the savings are expected to matter — 27B (unverified):**
+
+At 27B, each layer hidden state is 5120-wide. Full alignment on all 64 layers at seq=2048 would be:
+- 64 layers × 5120 × 2048 × 2 bytes = **1.3 GB** of alignment activations per step
+- With gradient accumulation, these accumulate
+
+With 4-of-64 layer sampling + 0.25 token ratio:
+- 4 × 5120 × 512 × 2 bytes = **21 MB** → ~60× reduction
+
+> **This 60× figure is calculated, not measured.** Whether it translates to a real training OOM difference on the cloud 27B setup (2× RTX PRO 6000, ZeRO-3) has not been validated. The 1.7B results confirm correctness (no NaN, gradient coverage) but not VRAM impact. Verification requires running cloud_27b.yaml with and without subsampling and comparing step logs.
+
+**Bugs fixed in this work:**
+- `all_reduce` on a single-element tuple returned a scalar, crashing single-component loss configs (e.g. pure MDM with no alignment) at step 2. Fixed in `tasks/train_torch.py`.
+
 ### Alternative: LDLM — Latent Diffusion (Heavy)
 
 **Paper**: [Latent Diffusion Language Models](https://arxiv.org/abs/2605.07933)
