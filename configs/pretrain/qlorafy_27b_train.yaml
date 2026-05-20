@@ -5,7 +5,7 @@
 # Anchor cache: 253 precomputed chunks, 4 layers (16,32,48,64).
 #
 # Launch:
-#   CUDA_VISIBLE_DEVICES=0 nohup .venv/bin/torchrun --nproc_per_node=1 \
+#   CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 #       tasks/train_torch.py configs/pretrain/qlorafy_27b_train.yaml \
 #       > /tmp/qlorafy_train.log 2>&1 &
 #   echo $! > /tmp/qlorafy_train.pid

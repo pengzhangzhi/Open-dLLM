@@ -97,6 +97,19 @@ step  loss   grad_norm  qlora_gn  tok/s  mfu   flops_achieved
 | Hardware | 1× RTX 5090 | 2× H100 | 8× H100 |
 | Training time | ~11 hrs (2000 steps) | 4–8 hrs (cluster, 10K steps) | 12–24 hrs (cluster, 50K steps) |
 
+### LoRA Rank vs VRAM (Qwen3.6-27B, NF4, seq_len=1024)
+
+| Rank | LoRA Params | Trainable % | LoRA GB | Optim GB | Total Est | Measured | Fits RTX 5090? |
+|---|---|---|---|---|---|---|---|
+| 16 | 73M | 0.27% | 0.15 | 0.59 | 24.0 GB | 24.0 GB | Yes |
+| 32 | 147M | 0.54% | 0.29 | 1.17 | 24.9 GB | 27.8 GB* | Yes (needs `expandable_segments:True`) |
+| 64 | 294M | 1.09% | 0.59 | 2.35 | 26.6 GB | OOM | No (28.4 GB + activations > 31.4 GB) |
+| 128 | 587M | 2.17% | 1.17 | 4.70 | 30.2 GB | — | No |
+
+*Measured is higher than estimated due to PEFT wrapping overhead and Gated DeltaNet activation tensors.
+
+**r=64 requires either:** (1) 2× GPU with model parallelism, (2) seq_len=512, or (3) a 48+ GB GPU (A6000, A100 80GB).
+
 ---
 
 ## Minimum Viable Path to Production
