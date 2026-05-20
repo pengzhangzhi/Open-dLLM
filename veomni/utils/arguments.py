@@ -186,9 +186,9 @@ class DataArguments:
         default=2,
         metadata={"help": "Number of workers to load data."},
     )
-    prefetch_factor: int = field(
-        default=2,
-        metadata={"help": "Number of batches loaded in advance by each worker."},
+    prefetch_factor: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of batches loaded in advance by each worker. None when num_workers=0."},
     )
     drop_last: bool = field(
         default=True,

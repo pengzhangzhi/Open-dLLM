@@ -109,11 +109,18 @@ def build_qlorafied_model(
     # ── Step 2: Load model in 4-bit ──────────────────────────────
     # Note: device_map='auto' is critical for NF4 — it places
     # quantized modules on the right device.
+    hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+    if getattr(hf_config, "language_model_only", False) is False:
+        hf_config.language_model_only = True
+
+    max_memory = {0: "30GiB"} if torch.cuda.is_available() else None
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
+        config=hf_config,
         torch_dtype=torch_dtype,
         quantization_config=bnb_config,
         device_map="auto",
+        max_memory=max_memory,
         trust_remote_code=trust_remote_code,
         **kwargs,
     )
