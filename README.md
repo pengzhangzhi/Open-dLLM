@@ -271,6 +271,77 @@ configs/pretrain/qwen2_5_coder_500M.yaml --data.train_path=data/data \
 --train.output_dir=logs/Qwen2.5-Coder-3B-Instruct_mdm_repr_align-10
 ```
 
+### QLoRA Repr-Align (27B on a single 32 GB GPU)
+
+For 27B+ models that don't fit in GPU memory at full precision, use **QLoRA Repr-Align**: NF4 quantized base (frozen) + LoRA adapters (trainable). Fits in ~22 GB VRAM.
+
+#### How NF4 quantization works
+
+No separate quantization step is needed. `bitsandbytes` quantizes weights on-the-fly during `from_pretrained()` via `BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4")`. The original bf16 weights on disk are never modified — quantization happens in GPU memory at load time. The 55 GB bf16 checkpoint becomes ~7 GB in VRAM.
+
+#### Step-by-step
+
+1. **Download model weights** (~55 GB):
+```bash
+huggingface-cli download Qwen/Qwen3.6-27B --local-dir /path/to/Qwen3.6-27B
+```
+
+2. **Precompute teacher anchor cache** (one-time, ~25 GB):
+```bash
+python scripts/precompute_anchor.py \
+    --model_path /path/to/Qwen3.6-27B \
+    --data_path /path/to/data.jsonl \
+    --output_dir /path/to/anchors/qwen3.6-27b \
+    --layers 16,32,48,64 \
+    --max_seq_len 1024 \
+    --max_examples 1000
+```
+
+3. **Prepare smoke data** (any plaintext JSONL with a `text` field):
+```bash
+head -20 your_data.jsonl > /tmp/smoke_20.jsonl
+```
+
+4. **Edit config** to point to your local paths in `configs/pretrain/qlorafy_27b.yaml`:
+```yaml
+model:
+  model_path: /path/to/Qwen3.6-27B    # step 1
+train:
+  anchor_cache_dir: /path/to/anchors/qwen3.6-27b  # step 2
+  data:
+    train_path: /tmp/smoke_20.jsonl   # step 3
+```
+
+5. **Run** (single GPU, ~22 GB VRAM):
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/torchrun --nproc_per_node=1 \
+    tasks/train_torch.py configs/pretrain/qlorafy_27b.yaml
+```
+
+#### What the config does
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `enable_qlorafy: true` | NF4 base + LoRA r=16 | 27B → ~7 GB in VRAM |
+| `language_model_only: true` | Auto-set by qlorafy.py | Skips 4.7 GB vision encoder |
+| `repr_align_wt: 1.0` | Alignment loss weight | Bidirectional adaptation |
+| `align_layers: "16,32,48,64"` | 4 of 64 layers | Evenly spaced |
+| `repr_align_sub_sample_ratio: 0.25` | 25% of tokens | 4× gradient memory reduction |
+| `save_epochs: 0` | Skip DCP checkpoint | DCP can't serialize `Params4bit` |
+
+#### Smoke test results (RTX 5090, 32 GB)
+
+| Metric | Value |
+|--------|-------|
+| NF4 base | 23.1 GiB |
+| LoRA adapters | 0.02 GiB |
+| Trainable params | 79.7M / 27B (0.30%) |
+| Peak VRAM | 27.2 GiB |
+| Speed | ~1.2 s/step |
+| Loss (10 steps) | 3.5–8.3, all gradients finite |
+
+> **Checkpoint limitation**: DCP (`torch.distributed.checkpoint`) cannot serialize `Params4bit` objects from bitsandbytes. Set `save_epochs: 0` and `save_steps: 999999` during training. To save LoRA weights, use `save_hf_weights: true` (exports PEFT adapter weights only, not the NF4 base).
+
 ### Uploading Checkpoints to Hugging Face
 
 ```python
