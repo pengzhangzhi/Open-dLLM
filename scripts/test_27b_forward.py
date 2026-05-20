@@ -14,8 +14,7 @@ import torch
 
 GGUF_PATH = (
     "/home/johndpope/.cache/huggingface/hub/"
-    "models--unsloth--Qwen3.6-27B-MTP-GGUF/blobs/"
-    "4085665ee36d82a672a238a43f0e5643f2f0e39f2d7bd5d373f0ef10ecf53095"
+    "models--unsloth--Qwen3.6-27B-GGUF/Qwen3.6-27B-UD-Q4_K_XL.gguf"
 )
 PROMPT = "The capital of France is"
 N_TOKENS = 32
