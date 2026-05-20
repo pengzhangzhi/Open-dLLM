@@ -623,6 +623,8 @@ def main():
                 names = sorted(step_loss_components.keys())
                 values = tuple(step_loss_components[name] for name in names)
                 reduced_values = all_reduce(values, group=reduce_group)
+                if not isinstance(reduced_values, (tuple, list)):
+                    reduced_values = (reduced_values,)
                 step_loss_components = {name: value for name, value in zip(names, reduced_values)}
 
             # NaN abort: count consecutive NaN/Inf loss steps and abort after threshold
