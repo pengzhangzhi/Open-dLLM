@@ -1,0 +1,94 @@
+# QLoRA Repr-Align — Qwen3.6-27B, full training
+#
+# 4-bit NF4 base + LoRA r=16 adapters on RTX 5090 (32 GB).
+# Data: FineWeb 100K sample on 12TB drive.
+# Anchor cache: 253 precomputed chunks, 4 layers (16,32,48,64).
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0 nohup .venv/bin/torchrun --nproc_per_node=1 \
+#       tasks/train_torch.py configs/pretrain/qlorafy_27b_train.yaml \
+#       > /tmp/qlorafy_train.log 2>&1 &
+#   echo $! > /tmp/qlorafy_train.pid
+#
+# Monitor:
+#   tail -f /tmp/qlorafy_train.log
+
+model:
+  model_path: /home/johndpope/ds_offload/models/Qwen3.6-27B
+  attn_implementation: sdpa
+  enable_qlorafy: true
+  qlorafy_config:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+    use_rslora: true
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 100000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 1024
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qlorafy-27b-train
+  ulysses_parallel_size: 1
+  global_batch_size: 16
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: false
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-27b
+  align_layers: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64"
+  repr_align_num_sample_layers: 8
+  repr_align_sub_sample_ratio: 0.25
+
+  optimizer: adamw
+  lr: 2.0e-4
+  lr_warmup_ratio: 0.05
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 2.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 100
+
+  data_parallel_mode: ddp
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 500
+  save_epochs: 0
+  save_hf_weights: true
+  auto_resume: true
+  save_time_interval_minutes: 0
+
+  use_wandb: false
+
+  max_steps: 5000
