@@ -1,0 +1,80 @@
+# VFM (Variational Flow Map) smoke test — open-dcoder-0.5B
+#
+# open-dcoder-0.5B is a pretrained masked diffusion model with bidirectional
+# attention. Using it as the VFM base should dramatically improve flow map
+# quality vs a causal model.
+#
+# Run on RTX PRO 4000 (GPU 1):
+#   CUDA_VISIBLE_DEVICES=1 torchrun --nproc_per_node=1 tasks/train_vfm.py \
+#       configs/pretrain/vfm_open_dcoder.yaml > /tmp/vfm_dcoder.log 2>&1 &
+
+model:
+  model_path: /run/media/johndpope/12TB/open_dllm/ldlm_model/open-dcoder-0.5B
+  attn_implementation: sdpa
+  vfm:
+    adapter_layers: 2
+    adapter_heads: 8
+    tau: 1.0
+    sigma: 1.0
+    alpha: 0.5
+    freeze_base: true
+    max_seq_len: 512
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 500
+  eval_size: 20
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 512
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /tmp/vfm_checkpoints/open_dcoder
+  ulysses_parallel_size: 1
+  global_batch_size: 8
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: false
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  optimizer: adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.05
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: false
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  data_parallel_mode: ddp
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 0
+  eval_every: 50
+  save_epochs: 0
+  save_hf_weights: true
+  auto_resume: false
+  save_time_interval_minutes: 0
+
+  use_wandb: true
+  wandb_project: open-dllm
+  wandb_name: vfm-open-dcoder
+
+  max_steps: 500

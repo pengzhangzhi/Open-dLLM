@@ -68,8 +68,8 @@ class VFMNoiseAdapter(nn.Module):
         gen_queries = torch.zeros(B, G, D, device=prompt_embeds.device, dtype=prompt_embeds.dtype)
         x = torch.cat([prompt_embeds, gen_queries], dim=1)
 
-        # Add positional embeddings
-        positions = torch.arange(P + G, device=x.device).unsqueeze(0)
+        # Add positional embeddings (clamp to max_seq_len to avoid OOB)
+        positions = torch.arange(P + G, device=x.device).unsqueeze(0).clamp(max=self.pos_embed.num_embeddings - 1)
         x = x + self.pos_embed(positions)
 
         # Transformer encoding (bidirectional)
@@ -137,6 +137,7 @@ class VFMFlowMapWrapper(nn.Module):
             attention_mask=attention_mask,
             use_cache=False,
             output_hidden_states=True,
+            is_causal=False,
         )
         logits = outputs.logits
         last_hidden = outputs.hidden_states[-1]
@@ -256,16 +257,21 @@ class VariationalFlowMap(nn.Module):
         # --- Losses ---
 
         # L_data: reconstruction in embedding space (only generation positions)
-        data_loss = F.mse_loss(
-            reconstructed[gen_mask],
-            all_embeds.detach()[gen_mask],
-        )
+        if gen_mask.sum() > 0:
+            data_loss = F.mse_loss(
+                reconstructed[gen_mask],
+                all_embeds.detach()[gen_mask],
+            )
+        else:
+            data_loss = torch.tensor(0.0, device=input_ids.device, dtype=logits.dtype)
 
         # L_obs: observation consistency — prompt tokens should be preserved
         # Use cross-entropy on prompt positions
-        if prompt_mask.sum() > 0:
-            prompt_logits = logits[prompt_mask.bool()]
-            prompt_targets = input_ids[prompt_mask.bool()]
+        prompt_bool = prompt_mask.bool()
+        if prompt_bool.sum() > 0:
+            prompt_logits = logits[prompt_bool]
+            prompt_targets = input_ids[prompt_bool].long()
+            prompt_targets = prompt_targets.clamp(0, self.vocab_size - 1)
             obs_loss = F.cross_entropy(prompt_logits, prompt_targets)
         else:
             obs_loss = torch.tensor(0.0, device=input_ids.device, dtype=logits.dtype)

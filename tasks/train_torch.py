@@ -795,28 +795,29 @@ def main():
                     if args.model.enable_qlorafy and global_step % 100 == 0:
                         try:
                             model.eval()
-                            prompt = "The meaning of life is"
-                            enc = tokenizer(prompt, return_tensors="pt")
-                            pids = enc.input_ids.to(model.device if hasattr(model, 'device') else next(model.parameters()).device)
-                            with torch.no_grad():
-                                if hasattr(model, 'diffusion_generate'):
-                                    from veomni.models.transformers.qwen2.generation_utils import MDMGenerationConfig
-                                    gen_cfg = MDMGenerationConfig(
-                                        mask_token_id=tokenizer.mask_token_id,
-                                        pad_token_id=tokenizer.pad_token_id,
-                                        eos_token_id=tokenizer.eos_token_id,
-                                        max_new_tokens=32, steps=32,
-                                        temperature=0.5, top_k=200, alg="p2", alg_temp=0.5,
-                                        num_return_sequences=1, return_dict_in_generate=True,
-                                    )
-                                    out = model.diffusion_generate(inputs=pids, generation_config=gen_cfg)
-                                    gen_text = tokenizer.decode(out.sequences[0][pids.shape[1]:], skip_special_tokens=True)
-                                else:
-                                    out = model.generate(pids, max_new_tokens=32, do_sample=True, temperature=0.5, top_k=200)
-                                    gen_text = tokenizer.decode(out[0][pids.shape[1]:], skip_special_tokens=True)
-                            train_metrics["generation/sample"] = wandb.Html(
-                                f"<b>Prompt:</b> {prompt}<br><b>Generated:</b> {gen_text}"
-                            )
+                            gen_prompts = ["The meaning of life is", "def fibonacci(n):"]
+                            gen_samples = []
+                            for gp in gen_prompts:
+                                enc = tokenizer(gp, return_tensors="pt")
+                                pids = enc.input_ids.to(model.device if hasattr(model, 'device') else next(model.parameters()).device)
+                                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                                    # AR generation
+                                    ar_out = model.generate(pids, max_new_tokens=64, do_sample=True, temperature=0.7, top_k=200)
+                                    ar_text = tokenizer.decode(ar_out[0][pids.shape[1]:], skip_special_tokens=True)
+
+                                    # Diffusion generation (masked, bidirectional)
+                                    from veomni.models.transformers.qwen2.generation_utils import mdm_generate
+                                    if tokenizer.mask_token_id is not None:
+                                        diff_ids = mdm_generate(model, pids, mask_token_id=tokenizer.mask_token_id, max_new_tokens=64, steps=16, temperature=0.7)
+                                        diff_text = tokenizer.decode(diff_ids[0][pids.shape[1]:], skip_special_tokens=True)
+                                    else:
+                                        diff_text = "(no mask token)"
+                                gen_samples.append(
+                                    f"<b>Prompt:</b> {gp}<br>"
+                                    f"<b>AR:</b> {ar_text}<br>"
+                                    f"<b>Diffusion (16-step):</b> {diff_text}"
+                                )
+                            train_metrics["generation/sample"] = wandb.Html("<hr>".join(gen_samples))
                             model.train()
                         except Exception as e:
                             logger.warning_rank0(f"[step {global_step}] Generation probe failed: {e}")

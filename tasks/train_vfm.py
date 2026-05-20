@@ -57,9 +57,10 @@ def build_vfm_model(args, tokenizer):
         low_cpu_mem_usage=True,
     )
 
-    base_model.resize_token_embeddings(len(tokenizer))
+    if len(tokenizer) > base_model.get_input_embeddings().weight.shape[0]:
+        base_model.resize_token_embeddings(len(tokenizer))
     hidden_size = config.hidden_size
-    vocab_size = len(tokenizer)
+    vocab_size = base_model.get_input_embeddings().weight.shape[0]
 
     vfm_cfg = getattr(args.model, "vfm", {}) or {}
     vfm = VariationalFlowMap(
@@ -340,6 +341,13 @@ def main():
                     k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in micro_batch.items()
                 }
+
+                ids = micro_batch["input_ids"]
+                if global_step % 10 == 0 or ids.max() > 151936:
+                    logger.info_rank0(
+                        f"[step {global_step}] input_ids: shape={ids.shape}, max={ids.max().item()}, "
+                        f"min={ids.min().item()}, n_mask={(ids == mask_token_id).sum().item()}/{ids.numel()}"
+                    )
 
                 with model_fwd_context, torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     fwd_out = vfm_forward(
