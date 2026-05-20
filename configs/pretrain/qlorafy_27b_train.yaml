@@ -33,7 +33,7 @@ model:
 
 data:
   train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
-  train_size: 100000
+  train_size: 1000
   dataloader_type: native
   data_type: plaintext
   max_seq_len: 1024
@@ -57,8 +57,7 @@ train:
   enable_masking: true
   repr_align_wt: 1.0
   anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-27b
-  align_layers: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64"
-  repr_align_num_sample_layers: 8
+  align_layers: "16,32,48,64"
   repr_align_sub_sample_ratio: 0.25
 
   optimizer: adamw
@@ -89,6 +88,8 @@ train:
   auto_resume: true
   save_time_interval_minutes: 0
 
-  use_wandb: false
+  use_wandb: true
+  wandb_project: open-dllm
+  wandb_name: qlorafy-27b-repr-align
 
-  max_steps: 5000
+  max_steps: 2000

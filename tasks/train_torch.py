@@ -659,6 +659,9 @@ def main():
             delta_time = time.time() - start_time
             lr = max(lr_scheduler.get_last_lr())
             train_metrics = environ_meter.step(delta_time, global_step=global_step)
+            if torch.cuda.is_available():
+                train_metrics["system/vram_allocated_gb"] = torch.cuda.memory_allocated() / 1e9
+                train_metrics["system/vram_reserved_gb"] = torch.cuda.memory_reserved() / 1e9
             for name, value in step_loss_components.items():
                 train_metrics[f"losses/{name}"] = value
 
@@ -718,6 +721,21 @@ def main():
                                 train_metrics["cola/card_tail_ratio"] = extras["tail_ratio"]
                             if "complementary_mask_ratio" in extras:
                                 train_metrics["cola/fast_block_mask_ratio"] = extras["complementary_mask_ratio"]
+
+                    if args.model.enable_qlorafy:
+                        try:
+                            lora_pnorm = 0.0
+                            lora_gnorm = 0.0
+                            for n, p in model.named_parameters():
+                                if "lora_" in n:
+                                    lora_pnorm += float(p.data.float().norm(2).item()) ** 2
+                                    if p.grad is not None:
+                                        lora_gnorm += float(p.grad.data.float().norm(2).item()) ** 2
+                            train_metrics["qlora/param_norm"] = lora_pnorm ** 0.5
+                            train_metrics["qlora/grad_norm"] = lora_gnorm ** 0.5
+                            train_metrics["qlora/grad_to_param_ratio"] = (lora_gnorm ** 0.5) / max(lora_pnorm ** 0.5, 1e-8)
+                        except Exception:
+                            pass
 
                     wandb.log(train_metrics, step=global_step)
 
