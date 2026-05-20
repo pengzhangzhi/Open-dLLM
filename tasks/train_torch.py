@@ -460,10 +460,10 @@ def main():
                 project=args.train.wandb_project,
                 name=args.train.wandb_name,
                 tags=["train"],
-                resume="allow",
+                resume="allow" if latest_checkpoint_path else None,
                 entity=args.train.wandb_entity,
-                id=args.train.wandb_name,
-                config={**vars(args.model), **vars(args.data), **vars(args.train)},  # flatten dict
+                id=args.train.wandb_name if latest_checkpoint_path else None,
+                config={**vars(args.model), **vars(args.data), **vars(args.train)},
             )
 
         if args.train.enable_profiling:
@@ -603,6 +603,15 @@ def main():
                 total_loss += loss_tensor.item()
                 del micro_batch
 
+            qlora_lora_gnorm = 0.0
+            qlora_lora_pnorm = 0.0
+            if args.model.enable_qlorafy:
+                for n, p in model.named_parameters():
+                    if "lora_" in n:
+                        qlora_lora_pnorm += float(p.data.float().norm(2).item()) ** 2
+                        if p.grad is not None:
+                            qlora_lora_gnorm += float(p.grad.data.float().norm(2).item()) ** 2
+
             if ds_engine is not None:
                 # DeepSpeed handles gradient clipping + opt step + zero_grad internally
                 ds_engine.step()
@@ -723,38 +732,34 @@ def main():
                                 train_metrics["cola/fast_block_mask_ratio"] = extras["complementary_mask_ratio"]
 
                     if args.model.enable_qlorafy:
-                        try:
-                            lora_pnorm = 0.0
-                            lora_gnorm = 0.0
-                            for n, p in model.named_parameters():
-                                if "lora_" in n:
-                                    lora_pnorm += float(p.data.float().norm(2).item()) ** 2
-                                    if p.grad is not None:
-                                        lora_gnorm += float(p.grad.data.float().norm(2).item()) ** 2
-                            train_metrics["qlora/param_norm"] = lora_pnorm ** 0.5
-                            train_metrics["qlora/grad_norm"] = lora_gnorm ** 0.5
-                            train_metrics["qlora/grad_to_param_ratio"] = (lora_gnorm ** 0.5) / max(lora_pnorm ** 0.5, 1e-8)
-                        except Exception:
-                            pass
+                        lora_pnorm = qlora_lora_pnorm ** 0.5
+                        lora_gnorm = qlora_lora_gnorm ** 0.5
+                        train_metrics["qlora/param_norm"] = lora_pnorm
+                        train_metrics["qlora/grad_norm"] = lora_gnorm
+                        train_metrics["qlora/grad_to_param_ratio"] = lora_gnorm / max(lora_pnorm, 1e-8)
 
                     if args.model.enable_qlorafy and global_step % 100 == 0:
                         try:
-                            from veomni.models.transformers.qwen2.generation_utils import MDMGenerationConfig
                             model.eval()
                             prompt = "The meaning of life is"
                             enc = tokenizer(prompt, return_tensors="pt")
                             pids = enc.input_ids.to(model.device if hasattr(model, 'device') else next(model.parameters()).device)
-                            gen_cfg = MDMGenerationConfig(
-                                mask_token_id=tokenizer.mask_token_id,
-                                pad_token_id=tokenizer.pad_token_id,
-                                eos_token_id=tokenizer.eos_token_id,
-                                max_new_tokens=32, steps=32,
-                                temperature=0.5, top_k=200, alg="p2", alg_temp=0.5,
-                                num_return_sequences=1, return_dict_in_generate=True,
-                            )
                             with torch.no_grad():
-                                out = model.diffusion_generate(inputs=pids, generation_config=gen_cfg)
-                            gen_text = tokenizer.decode(out.sequences[0][pids.shape[1]:], skip_special_tokens=True)
+                                if hasattr(model, 'diffusion_generate'):
+                                    from veomni.models.transformers.qwen2.generation_utils import MDMGenerationConfig
+                                    gen_cfg = MDMGenerationConfig(
+                                        mask_token_id=tokenizer.mask_token_id,
+                                        pad_token_id=tokenizer.pad_token_id,
+                                        eos_token_id=tokenizer.eos_token_id,
+                                        max_new_tokens=32, steps=32,
+                                        temperature=0.5, top_k=200, alg="p2", alg_temp=0.5,
+                                        num_return_sequences=1, return_dict_in_generate=True,
+                                    )
+                                    out = model.diffusion_generate(inputs=pids, generation_config=gen_cfg)
+                                    gen_text = tokenizer.decode(out.sequences[0][pids.shape[1]:], skip_special_tokens=True)
+                                else:
+                                    out = model.generate(pids, max_new_tokens=32, do_sample=True, temperature=0.5, top_k=200)
+                                    gen_text = tokenizer.decode(out[0][pids.shape[1]:], skip_special_tokens=True)
                             train_metrics["generation/sample"] = wandb.Html(
                                 f"<b>Prompt:</b> {prompt}<br><b>Generated:</b> {gen_text}"
                             )

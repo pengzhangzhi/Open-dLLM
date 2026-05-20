@@ -90,6 +90,6 @@ train:
 
   use_wandb: true
   wandb_project: open-dllm
-  wandb_name: qlorafy-27b-repr-align
+  wandb_name: qlorafy-27b-v2
 
   max_steps: 2000

@@ -93,12 +93,11 @@ def build_qlorafied_model(
         Model with LoRA adapters attached.
     """
     from peft import LoraConfig, TaskType, get_peft_model
-    from transformers import AutoConfig, AutoModelForCausalLM, BitsAndBytesConfig
+    from transformers import AutoConfig, BitsAndBytesConfig
 
     if config is None:
         config = QLoRAConfig()
 
-    # ── Step 1: 4-bit quantization config ────────────────────────
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=getattr(torch, config.bnb_4bit_compute_dtype),
@@ -106,33 +105,42 @@ def build_qlorafied_model(
         bnb_4bit_use_double_quant=config.bnb_4bit_use_double_quant,
     )
 
-    # ── Step 2: Load model in 4-bit ──────────────────────────────
-    # Note: device_map='auto' is critical for NF4 — it places
-    # quantized modules on the right device.
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-    if getattr(hf_config, "language_model_only", False) is False:
-        hf_config.language_model_only = True
+
+    if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "model_type"):
+        text_cfg = hf_config.text_config
+        text_cfg.pad_token_id = text_cfg.pad_token_id or 0
+        load_config = text_cfg
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+        model_cls = Qwen3_5ForCausalLM
+        load_trust_remote_code = False
+    else:
+        load_config = hf_config
+        if getattr(load_config, "language_model_only", False) is False:
+            load_config.language_model_only = True
+        from transformers import AutoModelForCausalLM
+        model_cls = AutoModelForCausalLM
+        load_trust_remote_code = trust_remote_code
 
     max_memory = {0: "30GiB"} if torch.cuda.is_available() else None
-    model = AutoModelForCausalLM.from_pretrained(
+    model = model_cls.from_pretrained(
         model_path,
-        config=hf_config,
+        config=load_config,
         torch_dtype=torch_dtype,
         quantization_config=bnb_config,
         device_map="auto",
         max_memory=max_memory,
-        trust_remote_code=trust_remote_code,
+        trust_remote_code=load_trust_remote_code,
+        low_cpu_mem_usage=True,
         **kwargs,
     )
     model.train()
 
-    # ── Step 3: Measure memory before LoRA ───────────────────────
     if torch.cuda.is_available():
         pre_lora_mem = torch.cuda.max_memory_allocated() / 1e9
     else:
         pre_lora_mem = 0
 
-    # ── Step 4: Attach LoRA adapters ─────────────────────────────
     peft_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=config.r,
@@ -147,7 +155,6 @@ def build_qlorafied_model(
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
-    # ── Step 5: Memory report ────────────────────────────────────
     if torch.cuda.is_available():
         post_lora_mem = torch.cuda.max_memory_allocated() / 1e9
         print(
