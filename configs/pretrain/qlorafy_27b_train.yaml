@@ -18,8 +18,8 @@ model:
   attn_implementation: sdpa
   enable_qlorafy: true
   qlorafy_config:
-    r: 16
-    lora_alpha: 32
+    r: 32
+    lora_alpha: 64
     lora_dropout: 0.05
     target_modules:
       - q_proj
@@ -90,6 +90,6 @@ train:
 
   use_wandb: true
   wandb_project: open-dllm
-  wandb_name: qlorafy-27b-v2
+  wandb_name: qlorafy-27b-r32
 
   max_steps: 2000
