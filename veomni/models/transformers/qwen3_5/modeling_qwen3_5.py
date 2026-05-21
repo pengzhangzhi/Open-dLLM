@@ -42,7 +42,9 @@ from transformers.utils import (
 
 from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
 from veomni.models.transformers.qwen2.multi_block_generation import MultiBlockDecoderMixin
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 from veomni.models.transformers.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+
 from veomni.models.transformers.qwen3_5.delta_rule import (
     chunk_gated_delta_rule_pytorch,
 )
@@ -552,7 +554,7 @@ class Qwen3_5DecoderLayer(GradientCheckpointingLayer):
 # ---------------------------------------------------------------------------
 
 class Qwen3_5PreTrainedModel(PreTrainedModel):
-    config_class = Qwen3_5Config
+    config_class = Qwen3_5TextConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["Qwen3_5DecoderLayer"]

@@ -305,6 +305,13 @@ Each model family is a subpackage with its own `modeling_*.py` and optional `gen
 - **llama** — LLaMA3-8B/72B
 - **deepseek_v3** — MoE models with routed experts
 
+**Qwen3.6-27B config quirks** (`Qwen3_5Config`): multi-modal config with `text_config` sub-config.
+- `text_config.pad_token_id` = None → set explicitly before loading if model __init__ reads it
+- `text_config.vocab_size` = 248320
+- `config.image_token_id` / `video_token_id` exist (vision modalities)
+- `config.language_model_only`, `config.get_text_config()` to access text sub-config
+- Local download at `/home/johndpope/qwen36_27b_local/` (15 shards, 52 GB safetensors)
+
 New models are registered in `veomni/models/transformers/__init__.py`. Architecture JSON configs live in `configs/model_configs/{family}/`.
 
 ### Seed Omni (`veomni/models/seed_omni/`)
