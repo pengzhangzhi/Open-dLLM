@@ -10,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from functools import partial
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 import torch.distributed as dist
@@ -58,36 +58,36 @@ def extract_humaneval_scores(output_path: str) -> Dict[str, float]:
     if not results_files:
         logger.warning(f"No results files found matching pattern: {results_pattern}")
         return {}
-    
+
     # Get the latest file based on timestamp in filename
     def extract_timestamp(filepath):
         match = re.search(r'(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d+)', filepath)
         return match.group(1) if match else ""
-    
+
     results_file = max(results_files, key=extract_timestamp)
     logger.info(f"Using results file: {results_file}")
-    
+
     try:
         with open(results_file, 'r') as f:
             results = json.load(f)
-        
+
         scores = {}
-        
+
         # HumanEval results are typically under 'results' -> 'humaneval'
         if 'results' in results and 'humaneval' in results['results']:
             humaneval_results = results['results']['humaneval']
-            
+
             # Extract pass@k metrics
             for key, value in humaneval_results.items():
                 if 'pass@' in key.lower():
                     scores[key] = value
-            
+
             logger.info(f"Extracted HumanEval scores: {scores}")
         else:
             logger.warning(f"HumanEval results not found in expected format. Keys: {results.keys()}")
-        
+
         return scores
-        
+
     except Exception as e:
         logger.error(f"Error extracting HumanEval scores: {e}")
         return {}
@@ -97,21 +97,21 @@ def freeze_layers_by_patterns(model, patterns_str, logger):
     """Freeze model parameters matching specified patterns."""
     if not patterns_str:
         return
-    
+
     patterns = [p.strip().lower() for p in patterns_str.split(',')]
     total_params = 0
     frozen_params = 0
     frozen_param_names = []
-    
+
     for name, param in model.named_parameters():
         total_params += param.numel()
         name_lower = name.lower()
-        
+
         if any(pattern in name_lower for pattern in patterns):
             param.requires_grad_(False)
             frozen_params += param.numel()
             frozen_param_names.append(name)
-    
+
     # Log results
     if frozen_params > 0:
         percentage = (frozen_params / total_params) * 100
@@ -180,7 +180,7 @@ def main():
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
     logger.info_rank0(json.dumps(asdict(args), indent=2))
     torch.cuda.set_device(f"cuda:{args.train.local_rank}")
-    
+
     # Initialize process group with extended timeout to handle long evaluation periods
     # Default timeout is 10 minutes, but evaluation can take 15-30 minutes
     if os.getenv("WORLD_SIZE"):
@@ -290,10 +290,13 @@ def main():
     # patch_deepspeed_zero_init_for_meta_tensors() is applied first to handle the
     # meta tensors created by accelerate's init_empty_weights() inside the loader.
     _ds_zero_ctx = None
-    if args.train.data_parallel_mode == "deepspeed" and args.train.init_device in ("meta", "cpu"):
+    if args.train.data_parallel_mode == "deepspeed" and args.train.ds_zero_stage == 3 and args.train.init_device in ("meta", "cpu"):
         import deepspeed as _ds_import
+
         from veomni.distributed.deepspeed_init import (
             build_ds_config as _build_ds_config_early,
+        )
+        from veomni.distributed.deepspeed_init import (
             patch_deepspeed_zero_init_for_meta_tensors as _patch_ds_meta,
         )
         _patch_ds_meta()
@@ -317,15 +320,19 @@ def main():
         anchor_cache_dir=getattr(args.train, "anchor_cache_dir", None),
         align_layers=getattr(args.train, "align_layers", None),
         repr_align_sub_sample_ratio=getattr(args.train, "repr_align_sub_sample_ratio", 1.0),
+        repr_align_num_sample_layers=getattr(args.train, "repr_align_num_sample_layers", None),
+        enable_nvfp4_qat=getattr(args.model, "enable_nvfp4_qat", False),
+        enable_qlorafy=getattr(args.model, "enable_qlorafy", False),
+        qlorafy_config=getattr(args.model, "qlorafy_config", None),
     )
-    
+
     model_config = model.config
     # lm_head_module = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
     # if lm_head_module is not None:
     #     for param in lm_head_module.parameters():
     #         param.requires_grad_(False)
     #     logger.info_rank0("Frozen LM head parameters.")
-    
+
     # Freeze layers based on patterns
     freeze_layers_by_patterns(model, args.train.freeze_layers, logger)
 
@@ -342,7 +349,7 @@ def main():
     # Off when cola_wt == 0. See veomni/models/cola_ldm/.
     # ------------------------------------------------------------------
     if args.train.cola_wt > 0:
-        from veomni.models.cola_ldm import ColaDLMHead, ColaReprAlignWrapper
+        from veomni.models.cola_ldm import ColaReprAlignWrapper, build_cola_head
 
         cfg = model.config
         if hasattr(cfg, "text_config") and hasattr(cfg.text_config, "hidden_size"):
@@ -350,8 +357,10 @@ def main():
         else:
             base_dim = cfg.hidden_size
 
-        cola_head = ColaDLMHead(
+        cola_variant = getattr(args.train, "cola_variant", "block_causal")
+        cola_head = build_cola_head(
             dim=base_dim,
+            variant=cola_variant,
             num_global=args.train.cola_num_global,
             num_local=args.train.cola_num_local,
             block_size=args.train.cola_block_size,
@@ -359,16 +368,22 @@ def main():
             diffusion_depth=args.train.cola_diffusion_depth,
             heads=args.train.cola_heads,
             prediction_type=args.train.cola_prediction,
+            lambda_tail=getattr(args.train, "cola_lambda_tail", 0.6),
         )
         n_cola_params = sum(p.numel() for p in cola_head.parameters())
         logger.info_rank0(
-            f"Cola head: dim={base_dim} global={args.train.cola_num_global} "
+            f"Cola head: dim={base_dim} variant={cola_variant} "
+            f"global={args.train.cola_num_global} "
             f"local={args.train.cola_num_local} block={args.train.cola_block_size} "
             f"enc_depth={args.train.cola_encoder_depth} diff_depth={args.train.cola_diffusion_depth} "
             f"pred={args.train.cola_prediction} "
             f"params={n_cola_params/1e6:.1f}M  detach_student={args.train.cola_detach_student}"
         )
 
+        # Move cola_head to same device as the base model before wrapping.
+        # build_cola_head() creates on CPU; the LM may already be on CUDA.
+        _lm_device = next(model.parameters()).device
+        cola_head = cola_head.to(_lm_device)
         model = ColaReprAlignWrapper(
             lm=model,
             cola_head=cola_head,
@@ -406,7 +421,8 @@ def main():
     )
     if get_optimizer_pre_hook is not None:
         optimizer_pre_hook = get_optimizer_pre_hook(model, model_config, args.train.data_parallel_mode)
-        optimizer.register_step_pre_hook(optimizer_pre_hook)
+        if optimizer_pre_hook is not None:
+            optimizer.register_step_pre_hook(optimizer_pre_hook)
 
     lr_scheduler = build_lr_scheduler(
         optimizer,
@@ -432,9 +448,8 @@ def main():
         model = ds_engine
 
         # Load actual HF weights into the ZeRO-3 partitioned model one shard at a time.
-        # Only rank 0 reads each file; GatheredParameters scatters to all ranks.
-        # Peak RAM ≈ one shard file instead of the full 70 GB.
-        if args.train.init_device in ("meta", "cpu"):
+        # Only needed for ZeRO-3 (meta init); ZeRO-1/2 loads weights normally before DS init.
+        if args.train.ds_zero_stage == 3 and args.train.init_device in ("meta", "cpu"):
             from veomni.distributed.deepspeed_init import load_hf_weights_zero3
             logger.info_rank0(f"Loading HF weights into ZeRO-3 model from {args.model.model_path}")
             load_hf_weights_zero3(ds_engine.module, args.model.model_path)
@@ -445,10 +460,10 @@ def main():
                 project=args.train.wandb_project,
                 name=args.train.wandb_name,
                 tags=["train"],
-                resume="allow",
+                resume="allow" if latest_checkpoint_path else None,
                 entity=args.train.wandb_entity,
-                id=args.train.wandb_name,
-                config={**vars(args.model), **vars(args.data), **vars(args.train)},  # flatten dict
+                id=args.train.wandb_name if latest_checkpoint_path else None,
+                config={**vars(args.model), **vars(args.data), **vars(args.train)},
             )
 
         if args.train.enable_profiling:
@@ -537,8 +552,8 @@ def main():
             torch.cuda.synchronize()
             start_time = time.time()
 
-            # NaN param check: scan first 5 params before forward on step > 1
-            if global_step > 1 and args.train.local_rank == 0:
+            # NaN param check: skip for quantized models (NF4 params are uint8, never NaN)
+            if global_step > 1 and args.train.local_rank == 0 and not getattr(args.model, "enable_qlorafy", False):
                 nan_params = [
                     n for n, p in list(model.named_parameters())[:20]
                     if p.data.is_floating_point() and not torch.isfinite(p.data).all()
@@ -588,10 +603,21 @@ def main():
                 total_loss += loss_tensor.item()
                 del micro_batch
 
+            qlora_lora_gnorm = 0.0
+            qlora_lora_pnorm = 0.0
+            if args.model.enable_qlorafy:
+                for n, p in model.named_parameters():
+                    if "lora_" in n:
+                        qlora_lora_pnorm += float(p.data.float().norm(2).item()) ** 2
+                        if p.grad is not None:
+                            qlora_lora_gnorm += float(p.grad.data.float().norm(2).item()) ** 2
+
             if ds_engine is not None:
                 # DeepSpeed handles gradient clipping + opt step + zero_grad internally
                 ds_engine.step()
                 grad_norm = ds_engine.get_global_grad_norm()
+                if grad_norm is None:  # ZeRO-2 + CPU optimizer may not compute norm
+                    grad_norm = 0.0
             elif args.train.data_parallel_mode == "fsdp1":
                 grad_norm = model.clip_grad_norm_(args.train.max_grad_norm).item()
             else:
@@ -609,6 +635,8 @@ def main():
                 names = sorted(step_loss_components.keys())
                 values = tuple(step_loss_components[name] for name in names)
                 reduced_values = all_reduce(values, group=reduce_group)
+                if not isinstance(reduced_values, (tuple, list)):
+                    reduced_values = (reduced_values,)
                 step_loss_components = {name: value for name, value in zip(names, reduced_values)}
 
             # NaN abort: count consecutive NaN/Inf loss steps and abort after threshold
@@ -640,6 +668,9 @@ def main():
             delta_time = time.time() - start_time
             lr = max(lr_scheduler.get_last_lr())
             train_metrics = environ_meter.step(delta_time, global_step=global_step)
+            if torch.cuda.is_available():
+                train_metrics["system/vram_allocated_gb"] = torch.cuda.memory_allocated() / 1e9
+                train_metrics["system/vram_reserved_gb"] = torch.cuda.memory_reserved() / 1e9
             for name, value in step_loss_components.items():
                 train_metrics[f"losses/{name}"] = value
 
@@ -692,6 +723,50 @@ def main():
                             train_metrics["cola_hist/z_global"] = wandb.Histogram(zg)
                             train_metrics["cola_hist/z_local"] = wandb.Histogram(zl)
 
+                        # Variant-specific metrics
+                        if extras is not None:
+                            if "tail_start" in extras:
+                                train_metrics["cola/card_tail_start"] = extras["tail_start"]
+                                train_metrics["cola/card_tail_ratio"] = extras["tail_ratio"]
+                            if "complementary_mask_ratio" in extras:
+                                train_metrics["cola/fast_block_mask_ratio"] = extras["complementary_mask_ratio"]
+
+                    if args.model.enable_qlorafy:
+                        lora_pnorm = qlora_lora_pnorm ** 0.5
+                        lora_gnorm = qlora_lora_gnorm ** 0.5
+                        train_metrics["qlora/param_norm"] = lora_pnorm
+                        train_metrics["qlora/grad_norm"] = lora_gnorm
+                        train_metrics["qlora/grad_to_param_ratio"] = lora_gnorm / max(lora_pnorm, 1e-8)
+
+                    if args.model.enable_qlorafy and global_step % 100 == 0:
+                        try:
+                            model.eval()
+                            prompt = "The meaning of life is"
+                            enc = tokenizer(prompt, return_tensors="pt")
+                            pids = enc.input_ids.to(model.device if hasattr(model, 'device') else next(model.parameters()).device)
+                            with torch.no_grad():
+                                if hasattr(model, 'diffusion_generate'):
+                                    from veomni.models.transformers.qwen2.generation_utils import MDMGenerationConfig
+                                    gen_cfg = MDMGenerationConfig(
+                                        mask_token_id=tokenizer.mask_token_id,
+                                        pad_token_id=tokenizer.pad_token_id,
+                                        eos_token_id=tokenizer.eos_token_id,
+                                        max_new_tokens=32, steps=32,
+                                        temperature=0.5, top_k=200, alg="p2", alg_temp=0.5,
+                                        num_return_sequences=1, return_dict_in_generate=True,
+                                    )
+                                    out = model.diffusion_generate(inputs=pids, generation_config=gen_cfg)
+                                    gen_text = tokenizer.decode(out.sequences[0][pids.shape[1]:], skip_special_tokens=True)
+                                else:
+                                    out = model.generate(pids, max_new_tokens=32, do_sample=True, temperature=0.5, top_k=200)
+                                    gen_text = tokenizer.decode(out[0][pids.shape[1]:], skip_special_tokens=True)
+                            train_metrics["generation/sample"] = wandb.Html(
+                                f"<b>Prompt:</b> {prompt}<br><b>Generated:</b> {gen_text}"
+                            )
+                            model.train()
+                        except Exception as e:
+                            logger.warning_rank0(f"[step {global_step}] Generation probe failed: {e}")
+
                     wandb.log(train_metrics, step=global_step)
 
                 if args.train.enable_profiling and global_step <= args.train.profile_end_step:
@@ -710,13 +785,13 @@ def main():
                 save_time_tensor = torch.tensor([int(save_time)], dtype=torch.int32, device='cuda')
                 dist.broadcast(save_time_tensor, src=0)
                 save_time = bool(save_time_tensor.item())
-            
+
             if save_step or eval_step:
                 helper.empty_cache()
                 if save_step:
                     save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, f"global_step_{global_step}")
                 elif eval_step:
-                    save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, f"eval")
+                    save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, "eval")
                 else:
                     raise ValueError("Invalid save or eval step")
                 print(f"save_checkpoint_path: {save_checkpoint_path}")
@@ -736,14 +811,14 @@ def main():
                     logger.info_rank0(f"Checkpoint saved to {save_checkpoint_path}")
                 else:
                     os.makedirs(save_checkpoint_path, exist_ok=True)
-                    logger.info_rank0(f"Skipping ZeRO checkpoint (save_optimizer_state=False); HF weights only.")
+                    logger.info_rank0("Skipping ZeRO checkpoint (save_optimizer_state=False); HF weights only.")
                 if args.train.global_rank == 0 and args.train.save_total_limit > 0:
                     _prune_old_checkpoints(args.train.save_checkpoint_path, args.train.save_total_limit)
 
                 # Barrier after checkpoint save, before evaluation
                 # This ensures all ranks have completed checkpoint before rank 0 starts eval
                 dist.barrier()
-                
+
                 if args.train.global_rank == 0 and args.train.save_hf_weights:
                     hf_weights_path = os.path.join(save_checkpoint_path, "hf_ckpt")
                     logger.info(f"Converting checkpoint from {save_checkpoint_path} to HF format")
@@ -754,18 +829,18 @@ def main():
                     )
                     save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
                     logger.info_rank0(f"Huggingface checkpoint saved at {hf_weights_path} successfully!")
-                    
+
                     # Run HumanEval evaluation
                     eval_output_path = os.path.join(save_checkpoint_path, "humaneval")
                     logger.info(f"Starting HumanEval evaluation for global_step {global_step}")
-                    
+
                     # Extract a clean model name for directory creation (avoid path sanitization)
                     # Use just the checkpoint directory name instead of full path
-                    
+
                     cmd = [
                             "python", "eval/eval_completion/eval_single.py",
                             "--model", "custom_coder",
-                            "--model_args", 
+                            "--model_args",
                             f"pretrained={hf_weights_path},"
                             "max_new_tokens=128,"
                             "steps=128,"
@@ -784,28 +859,28 @@ def main():
                     env.update({"HF_ALLOW_CODE_EVAL": "1"})
                     try:
                         result = subprocess.run(
-                            cmd, 
-                            env=env, 
-                            stdout=sys.stdout, 
+                            cmd,
+                            env=env,
+                            stdout=sys.stdout,
                             stderr=sys.stderr
                         )
                     except Exception as e:
                         logger.error(f"HumanEval evaluation failed: {e}")
-                    
+
                     eval_scores = extract_humaneval_scores(eval_output_path)
-                    
+
                     if eval_scores and args.train.use_wandb:
                         wandb_metrics = {
-                            f"eval/humaneval/{k}": v 
+                            f"eval/humaneval/{k}": v
                             for k, v in eval_scores.items()
                         }
                         wandb.log(wandb_metrics, step=global_step)
                         logger.info(f"Logged HumanEval scores to wandb: {wandb_metrics}")
-                
+
                 # Note: No barrier here! Other ranks continue immediately while rank 0 evaluates.
                 # This prevents timeout when evaluation takes longer than NCCL timeout.
                 logger.info_rank0(f"Checkpoint saved at {save_checkpoint_path} successfully!")
-            
+
             if save_time and args.train.save_optimizer_state:
                 helper.empty_cache()
                 state = {

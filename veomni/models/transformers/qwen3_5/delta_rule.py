@@ -20,9 +20,10 @@ Based on the Gated Delta Rule recurrence:
   o_t = q_t @ S_t
 """
 
+from typing import Optional, Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Optional, Tuple
 
 
 def chunk_gated_delta_rule_pytorch(

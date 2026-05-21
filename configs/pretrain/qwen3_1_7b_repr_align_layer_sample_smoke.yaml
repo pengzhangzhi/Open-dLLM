@@ -1,0 +1,89 @@
+# Qwen3-1.7B Repr-Align smoke test — per-layer + token subsampling
+#
+# Validates repr_align_num_sample_layers (layer-axis) and
+# repr_align_sub_sample_ratio (token-axis) end-to-end.
+#
+# Config: 4 configured layers, sample 2 per step + 25% token ratio
+# = 8× memory reduction on the alignment branch vs. full alignment.
+#
+# Prerequisite:
+#   Anchor cache already at /home/johndpope/ds_offload/anchors/qwen3-1.7b/
+#   (layers 7,14,21,28, seq_len 2048, 1000 examples)
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0 .venv/bin/torchrun --nproc_per_node=1 \
+#       tasks/train_torch.py \
+#       configs/pretrain/qwen3_1_7b_repr_align_layer_sample_smoke.yaml
+
+model:
+  model_path: Qwen/Qwen3-1.7B
+  attn_implementation: sdpa
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl
+  train_size: 1000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qwen3-1.7b-repr-align-layer-sample-smoke
+  ulysses_parallel_size: 1
+  global_batch_size: 8
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: false
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3-1.7b
+  align_layers: "7,14,21,28"
+  repr_align_num_sample_layers: 2     # sample 2 of 4 layers per step
+  repr_align_sub_sample_ratio: 0.25   # sample 25% of tokens
+                                      # combined: 8x memory cut on align branch
+
+  # Optimisation
+  optimizer: adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  # ZeRO-2 + CPU optimizer: AdamW fp32 states for 1.7B = ~13 GB → offload to RAM
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 2
+  ds_offload_optimizer: cpu
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_hf_weights: false
+  auto_resume: false
+  save_time_interval_minutes: 0
+
+  use_wandb: true
+  wandb_project: open-dllm-smoke
+  wandb_name: qwen3-1.7b-repr-align-layer-sample-2of4-token-0.25
+
+  max_steps: 100

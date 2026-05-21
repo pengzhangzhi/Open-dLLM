@@ -19,7 +19,7 @@ import torch
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedModel
 
 from ..auto import build_foundation_model, build_processor
-from ..module_utils import GradientCheckpointingLayer, init_empty_weights, load_model_weights
+from ..module_utils import init_empty_weights, load_model_weights
 from .configuration_seed_omni import SeedOmniConfig
 from .modeling_seed_omni import SeedOmniModel
 from .processing_seed_omni import SeedOmniProcessor

@@ -20,7 +20,7 @@ multi-head attention, with per-layer routing controlled by
 representation alignment distillation, and liger kernel integration.
 """
 
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -28,16 +28,11 @@ import torch.nn as nn
 from torch.nn import functional as F
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation import GenerationMixin
-from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
-from transformers.processing_utils import Unpack
+from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
@@ -45,18 +40,15 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 
+from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
 from veomni.models.transformers.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
 from veomni.models.transformers.qwen3_5.delta_rule import (
     chunk_gated_delta_rule_pytorch,
-    fused_recurrent_gated_delta_rule_pytorch,
 )
-from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
 
 from ....data.constants import IGNORE_INDEX
 from ....distributed.parallel_state import get_parallel_state
 from ....distributed.sequence_parallel import (
-    gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
     reduce_sequence_parallel_loss,
     slice_position_embedding,
 )
@@ -68,7 +60,6 @@ from ...module_utils import GradientCheckpointingLayer
 
 if is_liger_kernel_available():
     from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
-    from liger_kernel.transformers.rope import liger_rotary_pos_emb
 
 
 logger = logging.get_logger(__name__)
@@ -760,6 +751,9 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.loss_function = causallm_loss_function
         self.teacher_model = None
+        self.align_layers: Optional[list] = None
+        self.repr_align_sub_sample_ratio: float = 1.0
+        self.repr_align_num_sample_layers: Optional[int] = None
 
         self.post_init()
 
@@ -856,8 +850,24 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
             is_causal = False
             mask_ratio = mask_ratio[..., 1:].contiguous()
 
-        if (self.teacher_model is not None and repr_align_wt is not None and repr_align_wt > 0 and self.training):
-            output_hidden_states = True
+        _repr_align_active = (
+            self.teacher_model is not None
+            and repr_align_wt is not None
+            and repr_align_wt > 0
+            and self.training
+        )
+        _captured_student: dict = {}
+        _student_hooks: list = []
+        if _repr_align_active:
+            if self.align_layers is not None:
+                for _idx in self.align_layers:
+                    def _make_hook(idx: int):
+                        def _hook(module, inp, out):
+                            _captured_student[idx] = out[0] if isinstance(out, tuple) else out
+                        return _hook
+                    _student_hooks.append(self.model.layers[_idx - 1].register_forward_hook(_make_hook(_idx)))
+            else:
+                output_hidden_states = True
 
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
@@ -871,6 +881,8 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
             cache_position=cache_position,
             is_causal=is_causal,
         )
+        for _h in _student_hooks:
+            _h.remove()
 
         hidden_states = outputs[0]
 
@@ -890,8 +902,15 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
                     is_causal=True,
                 )
 
-            student_hidden_states = outputs.hidden_states
+            if _captured_student:
+                student_hidden_states = tuple(_captured_student[i] for i in self.align_layers)
+            else:
+                student_hidden_states = outputs.hidden_states
+                if self.align_layers is not None:
+                    student_hidden_states = tuple(student_hidden_states[i] for i in self.align_layers)
             teacher_hidden_states = teacher_outputs.hidden_states
+            if self.align_layers is not None:
+                teacher_hidden_states = tuple(teacher_hidden_states[i] for i in self.align_layers)
 
             loss_mask = (labels != IGNORE_INDEX)
             if loss_mask.any():
@@ -899,6 +918,22 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
                 student_stacked = student_stacked[loss_mask]
                 teacher_stacked = torch.cat([h[..., :-1, :] for h in teacher_hidden_states], dim=0).permute(1, 0, 2)
                 teacher_stacked = teacher_stacked[loss_mask]
+
+                # Layer subsampling: randomly pick k of L layers each step
+                if self.repr_align_num_sample_layers is not None:
+                    num_layers = student_stacked.size(1)
+                    k = min(self.repr_align_num_sample_layers, num_layers)
+                    layer_idx = torch.randperm(num_layers, device=student_stacked.device)[:k]
+                    student_stacked = student_stacked[:, layer_idx, :]
+                    teacher_stacked = teacher_stacked[:, layer_idx, :]
+
+                # Token subsampling: randomly pick fraction of V tokens each step
+                if self.repr_align_sub_sample_ratio < 1.0:
+                    num_valid = student_stacked.size(0)
+                    num_sample = max(1, int(num_valid * self.repr_align_sub_sample_ratio))
+                    token_idx = torch.randperm(num_valid, device=student_stacked.device)[:num_sample]
+                    student_stacked = student_stacked[token_idx]
+                    teacher_stacked = teacher_stacked[token_idx]
 
                 repr_align_loss = repr_align_loss_fn(student_stacked, teacher_stacked)
 

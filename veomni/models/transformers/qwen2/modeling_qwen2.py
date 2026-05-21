@@ -20,7 +20,6 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
-from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import (
@@ -73,7 +72,7 @@ class RepresentationAlignmentLoss(nn.Module):
         z2_norm = nn.functional.normalize(z2, p=2, dim=-1)
         cosine_sim = (z1_norm * z2_norm).sum(dim=-1)  # (..., 1)
         return 1.0 - cosine_sim.mean()
-    
+
 def repr_align_loss_fn(z1, z2):
     z1_norm = nn.functional.normalize(z1, p=2, dim=-1)
     z2_norm = nn.functional.normalize(z2, p=2, dim=-1)
@@ -884,12 +883,12 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
         self.model = Qwen2Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        
+
         # Initialize weights and apply final processing
         self.post_init()
-        
+
         self.teacher_model = None
-        
+
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -909,7 +908,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
     def get_decoder(self):
         return self.model
 
-   
+
 
 
 
@@ -994,18 +993,18 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
                     )
                 )
                 labels[cu_seq_lens[1:-1] - 1] = IGNORE_INDEX
-        
+
         if mask_ratio is not None:
             is_causal = False
             mask_ratio = mask_ratio[..., 1:].contiguous()
-        
+
         # Enable hidden states output for multi-layer alignment if teacher model is active
         if (self.teacher_model is not None \
             and repr_align_wt is not None \
             and repr_align_wt > 0 \
             and self.training):
             output_hidden_states = True
-            
+
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1023,8 +1022,8 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
         )
 
         hidden_states = outputs[0]
-        
-        
+
+
         # Compute multi-layer representation alignment loss
         repr_align_loss = None
         if (self.teacher_model is not None \
@@ -1033,7 +1032,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
             and self.training \
             and labels is not None \
             and mask_ratio is not None):
-            
+
             # Get teacher model outputs with all hidden states
             with torch.no_grad():
                 teacher_outputs = self.teacher_model(
@@ -1047,13 +1046,13 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
                     is_causal=True,  # Teacher always uses causal attention
                     **kwargs,
                 )
-            
+
             # Get all layer representations
             student_hidden_states = outputs.hidden_states
             teacher_hidden_states = teacher_outputs.hidden_states
-            
+
             # hidden_states = teacher_outputs.hidden_states[-1]
-            
+
             loss_mask = (labels != IGNORE_INDEX) # (L,)
             if loss_mask.any():
                 # h is shape [1, L, D], concatenate all layers in the first dimension and permute to [L, num_layers, D]
@@ -1061,16 +1060,16 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
                 student_stacked = student_stacked[loss_mask]
                 teacher_stacked = torch.cat([h[..., :-1, :] for h in teacher_hidden_states], dim=0).permute(1, 0, 2)
                 teacher_stacked = teacher_stacked[loss_mask]
-                
+
                 # Compute alignment loss
                 repr_align_loss = repr_align_loss_fn(
-                    student_stacked,  
+                    student_stacked,
                     teacher_stacked,
                 )
-                
-                
-                
-        
+
+
+
+
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         hidden_states = hidden_states[:, slice_indices, :]
@@ -1126,7 +1125,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
 
         else:
             logits = self.lm_head(hidden_states)
-        
+
         # Add representation alignment loss
         if repr_align_loss is not None:
             loss = loss + repr_align_wt * repr_align_loss
@@ -1156,7 +1155,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
             result.loss_components = {}
 
         return result
-    
+
 
 
 

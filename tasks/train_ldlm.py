@@ -25,12 +25,11 @@ Usage:
 
 import json
 import os
-import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from functools import partial
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 import torch.distributed as dist
@@ -38,7 +37,7 @@ import torch.nn.functional as F
 import wandb
 from tqdm import trange
 
-from veomni.checkpoint import build_checkpointer, ckpt_to_state_dict
+from veomni.checkpoint import build_checkpointer
 from veomni.data import (
     build_chat_template,
     build_dataloader,
@@ -48,14 +47,12 @@ from veomni.data import (
 from veomni.data.data_transform import process_pretrain_example, process_sft_example
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state
-from veomni.models import build_foundation_model, build_tokenizer, save_model_assets, save_model_weights
+from veomni.models import build_tokenizer, save_model_assets, save_model_weights
 from veomni.models.ldlm import (
-    LDLMAutoencoder,
-    DiffusionHead,
     AdaptiveTimestepSampler,
-    LDLMTrainer as LDLMTrainerWrapper,
+    DiffusionHead,
+    LDLMAutoencoder,
 )
-from veomni.optim import build_lr_scheduler, build_optimizer
 from veomni.utils import helper
 from veomni.utils.arguments import DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from veomni.utils.dist_utils import all_reduce
@@ -355,7 +352,7 @@ def main():
     # Multi-GPU strategy: encoder on GPU 0 (RTX 5090), trainable on GPU 1
     n_gpus = torch.cuda.device_count()
     if n_gpus >= 2:
-        logger.info_rank0(f"Multi-GPU: encoder on cuda:0, trainable on cuda:1")
+        logger.info_rank0("Multi-GPU: encoder on cuda:0, trainable on cuda:1")
         autoencoder.move_encoder_to_gpus(max_memory={0: "30GiB", "cpu": "60GiB"})
         trainable_device = torch.device("cuda:1")
     else:

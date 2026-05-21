@@ -87,6 +87,18 @@ class ModelArguments:
         default_factory=list,
         metadata={"help": "Basic modules beyond model._no_split_modules to be sharded in FSDP."},
     )
+    enable_nvfp4_qat: bool = field(
+        default=False,
+        metadata={"help": "Enable NVFP4 quantization-aware training (Blackwell 4-bit). Replaces nn.Linear with NVFP4FakeQuantizedLinear."},
+    )
+    enable_qlorafy: bool = field(
+        default=False,
+        metadata={"help": "Enable QLoRA: 4-bit NF4 base + LoRA adapters. Dramatically reduces VRAM for training."},
+    )
+    qlorafy_config: Optional[Dict[str, Any]] = field(
+        default_factory=dict,
+        metadata={"help": "QLoRA config dict (r, lora_alpha, target_modules, etc.). See veomni.models.qlorafy.QLoRAConfig."},
+    )
     ldlm: Dict[str, Any] = field(
         default_factory=dict,
         metadata={"help": "LDLM configuration (autoencoder, diffusion head, sampler)."},
@@ -174,9 +186,9 @@ class DataArguments:
         default=2,
         metadata={"help": "Number of workers to load data."},
     )
-    prefetch_factor: int = field(
-        default=2,
-        metadata={"help": "Number of batches loaded in advance by each worker."},
+    prefetch_factor: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of batches loaded in advance by each worker. None when num_workers=0."},
     )
     drop_last: bool = field(
         default=True,
@@ -218,7 +230,7 @@ class TrainingArguments:
         default=0,
         metadata={"help": "L2 regularization strength."},
     )
-    optimizer: Literal["adamw", "anyprecision_adamw", "apollo", "galore", "scale"] = field(
+    optimizer: Literal["adamw", "anyprecision_adamw", "apollo", "galore", "scale", "persistent_sparse_adam"] = field(
         default="adamw",
         metadata={"help": "Optimizer. Default to adamw."},
     )
@@ -283,8 +295,18 @@ class TrainingArguments:
             "help": (
                 "Fraction of valid tokens to sub-sample for the repr_align cosine loss "
                 "(1.0 = all tokens). Setting < 1.0 reduces gradient memory for the "
-                "alignment branch proportionally. E.g. 0.25 = 4× memory cut. "
-                "See docs/random_sub_sample_trick.md."
+                "alignment branch proportionally. E.g. 0.25 = 4× memory cut."
+            )
+        },
+    )
+    repr_align_num_sample_layers: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Number of layers to randomly sample per step for the repr_align cosine "
+                "loss (None = all configured layers). E.g. with align_layers='7,14,21,28' "
+                "(4 layers), setting 2 halves layer-axis gradient memory. Combine with "
+                "repr_align_sub_sample_ratio for multiplicative savings."
             )
         },
     )
@@ -336,6 +358,30 @@ class TrainingArguments:
     cola_prediction: str = field(
         default="v",
         metadata={"help": "Cola DiT prediction target: 'v' (Flow Matching velocity, paper default) or 'x0' (x0-prediction MSE)."},
+    )
+    cola_variant: str = field(
+        default="block_causal",
+        metadata={"help": "ColaDLM causal diffusion variant: 'block_causal' (Guide Labs), 'card' (soft-tail), 'fast_block' (Fast-dLLM v2)."},
+    )
+    cola_lambda_tail: float = field(
+        default=0.6,
+        metadata={"help": "CARD soft-tail aggressiveness (0.0–1.0). Only used when cola_variant='card'."},
+    )
+    # ------------------------------------------------------------------
+    # MTP (Multi-Token Prediction, Qwen3.6-style NextN)
+    # auxiliary head. Off when mtp_num_layers == 0.
+    # ------------------------------------------------------------------
+    mtp_num_layers: int = field(
+        default=0,
+        metadata={"help": "Number of MTP prediction layers (0 = disabled)."},
+    )
+    mtp_loss_weight: float = field(
+        default=0.1,
+        metadata={"help": "MTP auxiliary loss scaling factor."},
+    )
+    mtp_n_predict: int = field(
+        default=1,
+        metadata={"help": "Number of future tokens MTP head predicts."},
     )
     dyn_bsz: bool = field(
         default=True,
@@ -648,9 +694,11 @@ class TrainingArguments:
                     raise ValueError(
                         f"NVMe offload requires a valid ds_nvme_path directory, got: '{self.ds_nvme_path}'."
                     )
-            if self.init_device not in ("cpu", "meta"):
+            # zero.Init() (and meta tensors) are only needed for ZeRO-3 parameter
+            # partitioning. ZeRO-1/2 replicate weights like DDP — init on cuda directly.
+            if self.ds_zero_stage == 3 and self.init_device not in ("cpu", "meta"):
                 logger.info_rank0(
-                    f"Forcing init_device='meta' for DeepSpeed mode (was '{self.init_device}')."
+                    f"Forcing init_device='meta' for DeepSpeed ZeRO-3 (was '{self.init_device}')."
                 )
                 object.__setattr__(self, "init_device", "meta")
 

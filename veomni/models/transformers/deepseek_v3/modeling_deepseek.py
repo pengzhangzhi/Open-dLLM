@@ -65,10 +65,10 @@ from ....utils.import_utils import is_liger_kernel_available
 
 
 if is_liger_kernel_available():
+    from liger_kernel.ops.swiglu import LigerSiLUMulFunction
     from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss  # type: ignore
     from liger_kernel.transformers.rms_norm import LigerRMSNorm
     from liger_kernel.transformers.rope import liger_rotary_pos_emb
-    from liger_kernel.ops.swiglu import LigerSiLUMulFunction
 
 
 logger = logging.get_logger(__name__)

@@ -1,0 +1,107 @@
+# Qwen3-1.7B Repr-Align + Cola DLM — CARD soft-tail variant
+# ---------------------------------------------------------
+# Tests the new CARD (Causal Autoregressive Diffusion) head on a
+# small 1.7B model. Strictly causal attention + soft-tailed masking.
+# Only the tail of the sequence is noisy at timestep t, preserving
+# clean prefix anchors for stability.
+#
+# Uses the existing precomputed anchor cache (layers 7,14,21,28, seq_len 2048).
+# Includes repr_align_sub_sample_ratio: 0.25 to reduce alignment memory.
+#
+# Prerequisite:
+#   Anchor cache already exists at /home/johndpope/ds_offload/anchors/qwen3-1.7b/
+#   (255 chunked files from a previous precompute run)
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 \
+#       tasks/train_torch.py configs/pretrain/qwen3_1_7b_cola_card_smoke.yaml
+#   (CUDA_VISIBLE_DEVICES=0 pins to the 5090)
+
+model:
+  model_path: Qwen/Qwen3-1.7B
+  attn_implementation: sdpa
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl
+  train_size: 1000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qwen3-1.7b-cola-card-smoke
+  data_parallel_mode: ddp
+  ulysses_parallel_size: 1
+  global_batch_size: 8
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: false
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align with subsampling
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3-1.7b
+  align_layers: "7,14,21,28"
+  repr_align_sub_sample_ratio: 0.25
+
+  # ---- Cola DLM — CARD variant ----  
+  cola_wt: 0.5
+  cola_variant: card
+  cola_lambda_tail: 0.6
+  cola_num_global: 16
+  cola_num_local: 64
+  cola_block_size: 16
+  cola_encoder_depth: 2
+  cola_diffusion_depth: 4
+  cola_heads: 8
+  cola_source_layer: -3
+  cola_detach_student: true
+  cola_log_hist_every: 200
+  cola_prediction: v
+
+  # Optimisation (adamw for stability, not anyprecision_adamw)
+  optimizer: adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cuda
+
+  # ZeRO-2 + CPU optimizer offload: LM(1.7B) + Cola(600M) = 2.3B params.
+  # AdamW fp32 states = 18GB — OOM on single 32GB GPU with DDP.
+  # ZeRO-2 keeps params on GPU but offloads optimizer states to CPU (96GB RAM).
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 2
+  ds_offload_optimizer: cpu
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_hf_weights: false
+  auto_resume: true
+  save_time_interval_minutes: 0
+
+  use_wandb: true
+  wandb_project: open-dllm-smoke
+  wandb_name: qwen3-1.7b-cola-card-subsample-0.25
+
+  max_steps: 100

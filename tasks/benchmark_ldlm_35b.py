@@ -1,6 +1,9 @@
 import time
+
 import torch
-from veomni.models.ldlm.autoencoder import LDLMAutoencoder, DiffusionHead
+
+from veomni.models.ldlm.autoencoder import DiffusionHead, LDLMAutoencoder
+
 
 SEQ_LEN = 64
 DEPTH = 4
@@ -96,6 +99,8 @@ print(f"{'='*50}")
 
 save_dir = "/run/media/johndpope/12TB/open_dllm/ldlm_model"
 import os
+
+
 os.makedirs(save_dir, exist_ok=True)
 state = {
     "latent_encoder": autoencoder.latent_encoder.state_dict(),

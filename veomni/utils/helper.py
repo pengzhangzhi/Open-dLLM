@@ -167,7 +167,7 @@ class EnvironMeter:
             "mfu": mfu,
             "training/avg_effective_len": avg_effective_len,
             "training/avg_sample_seq_len": avg_sample_seq_len,
-            "tokens_per_second(M)": tokens_per_second / 1e6,
+            "tokens_per_second": tokens_per_second,
             "consume_tokens(M)": self.consume_tokens / 1e6,
             "consume_tokens(B)": self.consume_tokens / 1e9,
             "max_memory_allocated(GB)": allocated_memory / (1024**3),

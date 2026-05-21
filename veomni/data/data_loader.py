@@ -70,7 +70,7 @@ def build_dataloader(
     num_workers: int = 8,
     drop_last: bool = True,
     pin_memory: bool = True,
-    prefetch_factor: int = 2,
+    prefetch_factor: Optional[int] = None,
     seed: int = 0,
     enable_masking: bool = False,
     mask_token_id: Optional[int] = None,

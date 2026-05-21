@@ -20,13 +20,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
-
 from torch.optim import AdamW
 from torch.optim.optimizer import Optimizer
 
 from ..utils.import_utils import is_torch_npu_available
+from .persistent_sparse_adam import PersistentSparseAdam
 
-import math
 
 class SCALE(torch.optim.Optimizer):
     """
@@ -46,11 +45,11 @@ class SCALE(torch.optim.Optimizer):
         adam_lr=None,
         adamw_betas=(0.9, 0.999),
         adamw_eps=1e-8,
-        
+
     ):
 
         if adam_lr is None:
-            adam_lr = lr 
+            adam_lr = lr
 
         defaults = dict(
             lr=lr,
@@ -62,19 +61,19 @@ class SCALE(torch.optim.Optimizer):
         )
 
         params = list(main_params)
-        
+
         secondary_params = list(secondary_params) if secondary_params is not None else []
         params.extend(secondary_params)
- 
+
         oned_params = list(oned_params) if oned_params is not None else []
         params.extend(oned_params)
 
         self.id_to_name = id_to_name
         self.debug = debug
         self.max_lr = lr
-        
+
         super().__init__(params, defaults)
-        
+
         for p in main_params:
             self.state[p]["param_type"] = "main_param"
         for p in secondary_params:
@@ -93,8 +92,8 @@ class SCALE(torch.optim.Optimizer):
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
-                
-                
+
+
         for group in self.param_groups:
 
             #############################
@@ -106,7 +105,7 @@ class SCALE(torch.optim.Optimizer):
             wd = group["wd"]
             beta1 = group["momentum"]
 
-            for p in params:    
+            for p in params:
                 # sanity check
                 g = p.grad
                 if g is None:
@@ -114,20 +113,20 @@ class SCALE(torch.optim.Optimizer):
                 if g.ndim > 2:
                     g = g.view(g.size(0), -1)
                 assert g is not None
- 
+
                 if self.debug:
                     print("Main: ", self.id_to_name[id(p)])
-                
-                if self.id_to_name is not None and "embed_tokens" in self.id_to_name[id(p)]:  
+
+                if self.id_to_name is not None and "embed_tokens" in self.id_to_name[id(p)]:
                     col_dim = 0
                 else:
                     col_dim = 1
-                
+
                 # calc update
                 state = self.state[p]
 
                 if self.state[p]["param_type"] == "secondary_param":
-                    # add momentum 
+                    # add momentum
                     if "moment1" not in state:
                         state["moment1"] = torch.zeros_like(g)
                     buf1 = state["moment1"]
@@ -137,13 +136,13 @@ class SCALE(torch.optim.Optimizer):
                 var = torch.mean(torch.square(g), dim=col_dim, keepdim=True)
                 s = torch.sqrt(var).clamp_min_(1e-8)
                 u = g / s
-                
+
                 # apply weight decay
                 p.data.mul_(1 - lr * wd)
-                
+
                 # apply update
                 p.data.add_(u, alpha=-lr)
-                
+
                 if self.debug:
                     print("p.data.dtype: ", p.data.dtype, "u.dtype: ",  u.dtype)
 
@@ -158,22 +157,22 @@ class SCALE(torch.optim.Optimizer):
             beta1, beta2 = group["adamw_betas"]
             eps = group["adamw_eps"]
             weight_decay = group["wd"]
-            
+
             lr =  group['lr']
-            adam_lr = group['adam_lr'] 
+            adam_lr = group['adam_lr']
             max_lr = self.max_lr
-            
-            lr = (adam_lr / max_lr) * lr 
-            
-            for p in params:          
+
+            lr = (adam_lr / max_lr) * lr
+
+            for p in params:
                 g = p.grad
                 if g is None:
                     continue
-                
+
                 if self.debug:
                     print("1D (AdamW): ", self.id_to_name[id(p)])
-                    print("Adam lr = ", lr) 
-                
+                    print("Adam lr = ", lr)
+
                 state = self.state[p]
                 if "step" not in state:
                     state["step"] = 0
@@ -187,15 +186,15 @@ class SCALE(torch.optim.Optimizer):
                 buf2.lerp_(g.square(), 1 - beta2)
 
                 g = buf1 / (eps + buf2.sqrt())
-                
+
                 bias_correction1 = 1 - beta1**step
                 bias_correction2 = 1 - beta2**step
                 scale = bias_correction1 / bias_correction2**0.5
                 p.data.mul_(1 - lr * weight_decay)
-                p.data.add_(g, alpha=-lr / scale)                
+                p.data.add_(g, alpha=-lr / scale)
 
         return loss
-    
+
 # https://github.com/meta-llama/llama-recipes/blob/v0.0.4/src/llama_recipes/policies/anyprecision_optimizer.py
 class AnyPrecisionAdamW(Optimizer):
     def __init__(
@@ -319,7 +318,7 @@ def build_scale_param_groups(
     main_params: List[nn.Parameter] = []
     oned_params: List[nn.Parameter] = []
     secondary_params: List[nn.Parameter] = []
-    
+
     id_to_name_main_params = {}
     id_to_name_secondary_params = {}
     id_to_name_oned_params = {}
@@ -330,7 +329,7 @@ def build_scale_param_groups(
             continue
         if not any(target_key in module_name for target_key in target_modules):
             continue
-        
+
         main_params.append(module.weight)
         id_to_name_main_params[id(module.weight)] = module_name
 
@@ -338,7 +337,7 @@ def build_scale_param_groups(
     for param_name, p in model.named_parameters():
         if id(p) in id_to_name_main_params:
             continue
-        
+
         if p.ndim == 1:
             oned_params.append(p)
             id_to_name_oned_params[id(p)] = param_name
@@ -360,12 +359,12 @@ def build_scale_param_groups(
                     print("Secondary module: ", module_name)
 
     id_to_name = {**id_to_name_main_params, **id_to_name_secondary_params, **id_to_name_oned_params}
-    
+
     # Print parameter counts
     print(f"Number of main parameters: {sum(p.numel() for p in main_params if p.requires_grad)}")
     print(f"Number of secondary parameters: {sum(p.numel() for p in secondary_params if p.requires_grad)}")
     print(f"Number of 1D parameters: {sum(p.numel() for p in oned_params if p.requires_grad)}")
-    
+
     return main_params, secondary_params, oned_params, id_to_name
 
 
@@ -509,7 +508,7 @@ def build_optimizer(
         # Create APOLLO optimizer using training args for lr, betas, weight_decay
         optim = APOLLOAdamW(param_groups, lr=lr)
     elif optimizer_type == "galore":
-        from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor
+        from galore_torch import GaLoreAdamW
         print("Building GaLore param groups...")
         param_groups, _, _ = build_galore_param_groups(
             model,
@@ -541,7 +540,15 @@ def build_optimizer(
             adamw_betas=betas,
             adamw_eps=eps,
         )
+    elif optimizer_type == "persistent_sparse_adam":
+        optim = PersistentSparseAdam(
+            param_groups,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+        )
     else:
-        raise ValueError("Only adamw, anyprecision_adamw, apollo, galore, and scale are supported as optimizers.")
+        raise ValueError("Only adamw, adamw_8bit, anyprecision_adamw, apollo, galore, scale, and persistent_sparse_adam are supported as optimizers.")
 
     return optim

@@ -37,6 +37,13 @@ from .comm import (
     set_ulysses_sequence_parallel_group,
     set_unified_sequence_parallel_group,
 )
+from .data import (
+    gather_outputs,
+    sequence_parallel_preprocess,
+    slice_input_tensor,
+    slice_input_tensor_scale_grad,
+    slice_position_embedding,
+)
 from .loss import reduce_sequence_parallel_loss
 from .ulysses import (
     all_to_all_images,
@@ -46,13 +53,7 @@ from .ulysses import (
     slice_input_tensor,
 )
 from .utils import pad_tensor, unpad_tensor, vlm_images_a2a_meta
-from .data import (
-    gather_outputs,
-    sequence_parallel_preprocess,
-    slice_input_tensor,
-    slice_input_tensor_scale_grad,
-    slice_position_embedding,
-)
+
 
 __all__ = [
     "init_sequence_parallel",

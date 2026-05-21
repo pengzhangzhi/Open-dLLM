@@ -17,7 +17,6 @@ from functools import partial
 from typing import Any, Dict, List, Optional
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.fsdp import CPUOffload, FullyShardedDataParallel, MixedPrecision, ShardingStrategy
 from torch.distributed.fsdp._runtime_utils import _lazy_init

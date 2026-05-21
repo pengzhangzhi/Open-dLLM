@@ -19,9 +19,9 @@ Dynamically adjusts the sampling distribution so that the expected
 denoising loss grows linearly with t in [0, 1].
 """
 
-import torch
-import torch.nn.functional as F
 from typing import Optional
+
+import torch
 
 
 class AdaptiveTimestepSampler:
