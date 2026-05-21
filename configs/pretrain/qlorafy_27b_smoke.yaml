@@ -1,17 +1,18 @@
-# QLoRA Repr-Align — Qwen3.6-27B, full training
+# QLoRA Repr-Align — Qwen3.6-27B, smoke test (10 steps)
 #
-# 4-bit NF4 base + LoRA r=16 adapters on RTX 5090 (32 GB).
-# Data: FineWeb 100K sample on 12TB drive.
-# Anchor cache: 253 precomputed chunks, 4 layers (16,32,48,64).
+# 4-bit NF4 base + LoRA r=32 adapters on RTX 5090 (34 GB).
+# Data: FineWeb 100K sample on 12TB drive (1000 examples).
+# Anchor cache: 1293 precomputed chunks, 4 layers (16,32,48,64).
 #
 # Launch:
 #   CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-#       tasks/train_torch.py configs/pretrain/qlorafy_27b_train.yaml \
-#       > /tmp/qlorafy_train.log 2>&1 &
-#   echo $! > /tmp/qlorafy_train.pid
+#       tasks/train_torch.py configs/pretrain/qlorafy_27b_smoke.yaml \
+#       > /tmp/qlorafy_smoke.log 2>&1 &
+#   echo $! > /tmp/qlorafy_smoke.pid
 #
 # Monitor:
-#   tail -f /tmp/qlorafy_train.log
+#   tail -f /tmp/qlorafy_smoke.log
+#   nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader -i 0
 
 model:
   model_path: /home/johndpope/ds_offload/models/Qwen3.6-27B
@@ -49,8 +50,8 @@ train:
   ulysses_parallel_size: 1
   global_batch_size: 16
   micro_batch_size: 1
-  rmpad: false
-  rmpad_with_pos_ids: false
+  rmpad: true
+  rmpad_with_pos_ids: true
   bsz_warmup_ratio: 0.0
   dyn_bsz_margin: 0
   dyn_bsz_buffer_size: 50
