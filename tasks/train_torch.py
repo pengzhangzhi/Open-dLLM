@@ -10,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from functools import partial
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -30,6 +30,9 @@ from veomni.distributed.parallel_state import get_parallel_state, init_parallel_
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models import build_foundation_model, build_tokenizer, save_model_assets, save_model_weights
 from veomni.optim import build_lr_scheduler, build_optimizer
+from veomni.ops.replay_buffer import ReprAlignReplayBuffer
+from veomni.ops.trajectory_dataset import TrajectoryDataset
+from veomni.data.data_collator import DataCollatorWithTrajectoryMasking
 from veomni.utils import helper
 from veomni.utils.arguments import DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from veomni.utils.dist_utils import all_reduce
@@ -281,6 +284,29 @@ def main():
                 )
                 logger.info_rank0(f"Eval split: {n_eval} examples held out from {n_total} total")
 
+        trajectory_dataset = None
+        trajectory_collator = None
+        _traj_path = getattr(args.train, "trajectory_data_path", None)
+        if _traj_path and getattr(args.train, "repr_align_wt", 0) > 0:
+            trajectory_dataset = TrajectoryDataset(_traj_path)
+            logger.info_rank0(
+                f"Trajectory dataset loaded: {len(trajectory_dataset)} samples from {_traj_path}"
+            )
+            trajectory_collator = DataCollatorWithTrajectoryMasking(
+                mask_token_id=tokenizer.mask_token_id,
+                trajectory_dataset=trajectory_dataset,
+                current_mask_ratio=getattr(args.train, "trajectory_min_mask_ratio", 0.0),
+                max_mask_ratio=getattr(args.train, "trajectory_max_mask_ratio", 0.8),
+                current_block_size=32,
+                use_blockwise_loss=getattr(args.train, "trajectory_use_blockwise", False),
+            )
+            # When using trajectory collator, override to avoid random masking collator
+            _enable_masking = True
+            _custom_collate = trajectory_collator
+        else:
+            _enable_masking = args.train.enable_masking
+            _custom_collate = None
+
         train_dataloader = build_dataloader(
             dataset=train_dataset,
             micro_batch_size=args.train.micro_batch_size,
@@ -291,8 +317,9 @@ def main():
             train_steps=args.train.train_steps,
             rmpad=args.train.rmpad,
             rmpad_with_pos_ids=args.train.rmpad_with_pos_ids,
-            enable_masking=args.train.enable_masking,
+            enable_masking=_enable_masking,
             mask_token_id=tokenizer.mask_token_id,
+            collate_fn=_custom_collate,
             bsz_warmup_ratio=args.train.bsz_warmup_ratio,
             bsz_warmup_init_mbtoken=args.train.bsz_warmup_init_mbtoken,
             dyn_bsz_margin=args.train.dyn_bsz_margin,
@@ -570,6 +597,31 @@ def main():
     consecutive_nan_steps = 0
     nan_abort_threshold = 3
 
+    replay_buffer: Optional[ReprAlignReplayBuffer] = None
+    _replay_capacity = getattr(args.train, "replay_buffer_capacity", 0)
+    if _replay_capacity > 0 and getattr(args.train, "repr_align_wt", 0) > 0:
+        replay_buffer = ReprAlignReplayBuffer(capacity=_replay_capacity)
+        logger.info_rank0(
+            f"ReprAlign replay buffer initialised (capacity={_replay_capacity}, "
+            f"prob={args.train.replay_prob}, warmup={args.train.replay_warmup_steps})"
+        )
+
+    # d3LLM curriculum schedule — parse once before training loop
+    _traj_prog_blocks = getattr(args.train, "trajectory_progressive_block_sizes", None)
+    if _traj_prog_blocks is not None:
+        _traj_prog_blocks = [int(x) for x in _traj_prog_blocks.split(",")]
+    _traj_min_mask = getattr(args.train, "trajectory_min_mask_ratio", 0.0)
+    _traj_max_mask = getattr(args.train, "trajectory_max_mask_ratio", 0.8)
+    _traj_entropy_wt = getattr(args.train, "trajectory_entropy_weight", 0.0)
+
+    if trajectory_collator is not None:
+        logger.info_rank0(
+            f"d3LLM trajectory distillation active: "
+            f"mask_ratio [{_traj_min_mask} → {_traj_max_mask}], "
+            f"progressive_blocks={_traj_prog_blocks or 'full-seq'}, "
+            f"entropy_wt={_traj_entropy_wt}"
+        )
+
     for epoch in range(start_epoch, args.train.num_train_epochs):
         if hasattr(train_dataloader, "set_epoch"):
             train_dataloader.set_epoch(epoch)
@@ -584,6 +636,15 @@ def main():
         data_iterator = iter(train_dataloader)
         for _ in range(start_step, args.train.train_steps):
             global_step += 1
+
+            # Update trajectory collator curriculum schedule
+            if trajectory_collator is not None:
+                progress = min(global_step / max(args.train.train_steps, 1), 1.0)
+                trajectory_collator.current_mask_ratio = _traj_min_mask + progress * (_traj_max_mask - _traj_min_mask)
+                if _traj_prog_blocks:
+                    ep = min(epoch, len(_traj_prog_blocks) - 1)
+                    trajectory_collator.current_block_size = _traj_prog_blocks[ep]
+
             step_loss_components: Dict[str, float] = {}
 
             try:
@@ -621,36 +682,54 @@ def main():
                     for name, value in loss_components.items():
                         step_loss_components[name] = step_loss_components.get(name, 0.0) + value / len(micro_batches)
 
-                    # DifferentialReplayLoss over the repr_align hidden states.
-                    # Teacher velocity: (teacher_hs - z), Student velocity: (student_hs - z).
-                    # No extra forward passes — reuses states already computed by repr_align.
-                    _dr_wt = getattr(args.train, "diff_replay_wt", 0.0)
-                    if _dr_wt > 0:
-                        _s_states = getattr(outputs, "repr_align_student_states", None)
-                        _t_states = getattr(outputs, "repr_align_teacher_states", None)
-                        if _s_states is not None and _t_states is not None:
-                            from veomni.ops.differential_replay import DifferentialReplayLoss
-                            # Use last align layer: [B, L, D]
-                            _z_student = _s_states[-1]
-                            _z_teacher = _t_states[-1].detach()
-                            _z_init = _z_student.detach()
-                            _T = getattr(args.train, "diff_replay_teacher_steps", 8)
-                            _S = getattr(args.train, "diff_replay_student_steps", 4)
-                            _t_sigs = torch.linspace(1.0, 0.0, _T + 1, device=loss_tensor.device)
-                            _s_sigs = torch.linspace(1.0, 0.0, _S + 1, device=loss_tensor.device)
-                            _dr_loss, _ = DifferentialReplayLoss(teacher_steps=_T, student_steps=_S)(
-                                z_init=_z_init,
-                                teacher_denoise_fn=lambda z, sigma: (_z_teacher - z),
-                                student_denoise_fn=lambda z, sigma: (_z_student - z),
-                                teacher_sigmas=_t_sigs,
-                                student_sigmas=_s_sigs,
-                            )
-                            if torch.isfinite(_dr_loss):
-                                loss_tensor = loss_tensor + _dr_wt * _dr_loss / len(micro_batches)
-                                step_loss_components["diff_replay"] = (
-                                    step_loss_components.get("diff_replay", 0.0)
-                                    + _dr_loss.item() / len(micro_batches)
+                    # Repr-Align replay buffer: push current batch, sample past batch,
+                    # re-run student alignment on old data to prevent forgetting.
+                    if replay_buffer is not None:
+                        replay_buffer.push(micro_batch)
+                        _replay_prob = getattr(args.train, "replay_prob", 0.3)
+                        _replay_warmup = getattr(args.train, "replay_warmup_steps", 50)
+                        _replay_weight = getattr(args.train, "replay_weight", 0.1)
+                        if (
+                            len(replay_buffer) >= _replay_warmup
+                            and torch.rand(1, device=loss_tensor.device).item() < _replay_prob
+                        ):
+                            _replay_batch = replay_buffer.sample(loss_tensor.device)
+                            if _replay_batch is not None:
+                                _replay_outputs = model(
+                                    **_replay_batch, use_cache=False, repr_align_wt=args.train.repr_align_wt
                                 )
+                                _replay_align = getattr(_replay_outputs, "loss_components", {}).get("repr_align", None)
+                                if _replay_align is not None and torch.isfinite(torch.tensor(_replay_align)):
+                                    loss_tensor = loss_tensor + _replay_weight * _replay_align / len(micro_batches)
+                                    step_loss_components["replay"] = (
+                                        step_loss_components.get("replay", 0.0)
+                                        + _replay_align / len(micro_batches)
+                                    )
+
+                    # d3LLM-style entropy regularization on correctly-predicted masked tokens
+                    if trajectory_collator is not None and _traj_entropy_wt > 0:
+                        _logits = getattr(outputs, "logits", None)
+                        _labels = micro_batch.get("labels", None)
+                        if _logits is not None and _labels is not None:
+                            from torch.nn import functional as _F
+                            _logits_s = _logits[:, :-1].float()
+                            _labels_s = _labels[:, 1:]
+                            _mask = _labels_s != IGNORE_INDEX
+                            if _mask.any():
+                                _temp = getattr(args.train, "trajectory_temperature", 0.5)
+                                _mlogits = _logits_s[_mask]
+                                _mlabels = _labels_s[_mask]
+                                _probs = _F.softmax(_mlogits / _temp, dim=-1)
+                                _H = -(_probs * torch.log(_probs + 1e-12)).sum(dim=-1)
+                                _pred = _mlogits.argmax(dim=-1)
+                                _correct = _pred == _mlabels
+                                if _correct.any():
+                                    _ent_loss = (_H * _correct).sum() / _correct.sum().clamp_min(1)
+                                    loss_tensor = loss_tensor + _traj_entropy_wt * _ent_loss / len(micro_batches)
+                                    step_loss_components["trajectory_entropy"] = (
+                                        step_loss_components.get("trajectory_entropy", 0.0)
+                                        + _ent_loss.item() / len(micro_batches)
+                                    )
 
                     step_has_nan = not torch.isfinite(loss_tensor)
                     if step_has_nan and args.train.local_rank == 0:

@@ -319,21 +319,60 @@ class TrainingArguments:
         },
     )
     # ------------------------------------------------------------------
-    # DifferentialReplayLoss — distills T-step hidden-state trajectory → S steps.
-    # Requires repr_align_wt > 0 (uses the same student/teacher hidden states).
-    # Off when diff_replay_wt == 0.
+    # Replay buffer for Repr-Align — stores past batches and replays
+    # alignment loss on old data to prevent catastrophic forgetting.
+    # Requires repr_align_wt > 0 and anchor_cache_dir.
+    # Off when replay_buffer_capacity == 0.
+    # Reference: VFM Ripple NoiseReplayBuffer.
     # ------------------------------------------------------------------
-    diff_replay_wt: float = field(
+    replay_buffer_capacity: int = field(
+        default=0,
+        metadata={"help": "Capacity of the ReprAlign replay buffer (0 = disabled). Stores past micro_batches and replays cosine alignment on old data."},
+    )
+    replay_prob: float = field(
+        default=0.3,
+        metadata={"help": "Probability of sampling from replay buffer each step (only when buffer is warm)."},
+    )
+    replay_warmup_steps: int = field(
+        default=50,
+        metadata={"help": "Minimum number of stored batches before replay sampling begins. Prevents sparse-buffer noise."},
+    )
+    replay_weight: float = field(
+        default=0.1,
+        metadata={"help": "Weight for the replay cosine alignment loss relative to current-batch alignment."},
+    )
+    # ------------------------------------------------------------------
+    # d3LLM-style trajectory-guided masking for Repr-Align training.
+    # Replaces random masking with teacher-trajectory-guided masking.
+    # Requires trajectory_data_path to be set (pre-computed trajectories).
+    # ------------------------------------------------------------------
+    trajectory_data_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to pre-computed trajectories JSONL (d3LLM-style). When set, replaces random masking with trajectory-guided masking."},
+    )
+    trajectory_min_mask_ratio: float = field(
         default=0.0,
-        metadata={"help": "Weight for DifferentialReplayLoss (0 = disabled). Requires repr_align_wt > 0."},
+        metadata={"help": "Starting mask ratio for curriculum schedule (0.0 = all tokens visible). Increases linearly to max over training."},
     )
-    diff_replay_teacher_steps: int = field(
-        default=8,
-        metadata={"help": "Number of Euler steps for the teacher trajectory in DifferentialReplayLoss."},
+    trajectory_max_mask_ratio: float = field(
+        default=0.8,
+        metadata={"help": "Ending mask ratio for curriculum schedule. Tokens masked at training time according to trajectory order."},
     )
-    diff_replay_student_steps: int = field(
-        default=4,
-        metadata={"help": "Number of Euler steps for the student trajectory in DifferentialReplayLoss."},
+    trajectory_progressive_block_sizes: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated list of block sizes for progressive curriculum, e.g. '16,24,32'. Each epoch uses the interpolated size between entries. None = full-sequence masking."},
+    )
+    trajectory_use_blockwise: bool = field(
+        default=False,
+        metadata={"help": "If True, only predict a random block per sample; otherwise mask the entire response region."},
+    )
+    trajectory_entropy_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for entropy regularization loss on correctly-predicted masked tokens (d3LLM-style). 0 = disable."},
+    )
+    trajectory_temperature: float = field(
+        default=0.5,
+        metadata={"help": "Temperature for entropy regularization softmax."},
     )
     # ------------------------------------------------------------------
     # Cola DLM (Continuous Latent Diffusion LM, arXiv:2605.06548)

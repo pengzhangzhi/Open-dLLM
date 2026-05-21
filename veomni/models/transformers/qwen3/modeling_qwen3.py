@@ -1127,6 +1127,11 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
         else:
             result.loss_components = {}
 
+        # Expose repr_align hidden states for DifferentialReplayLoss in the training loop.
+        if _repr_align_active and teacher_outputs is not None:
+            result.repr_align_student_states = student_hidden_states
+            result.repr_align_teacher_states = teacher_hidden_states
+
         return result
 
 

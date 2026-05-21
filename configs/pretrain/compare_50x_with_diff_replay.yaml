@@ -1,0 +1,63 @@
+model:
+  model_path: Qwen/Qwen3-1.7B
+  attn_implementation: sdpa
+
+data:
+  train_path: /home/johndpope/ds_offload/data_50.jsonl
+  train_size: 50
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/compare-50x-with-replay
+  data_parallel_mode: ddp
+  ulysses_parallel_size: 1
+  global_batch_size: 1
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+  enable_masking: true
+  repr_align_wt: 1.0
+  replay_buffer_capacity: 1024
+  replay_prob: 0.3
+  replay_warmup_steps: 10
+  replay_weight: 0.1
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3-1.7b-50x
+  align_layers: "7,14,21,28"
+  freeze_layers: ""
+  num_train_epochs: 100
+  optimizer: anyprecision_adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: true
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 50
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 1000000
+  save_epochs: 0
+  save_hf_weights: false
+  auto_resume: false
+  save_time_interval_minutes: 0
+  use_wandb: true
+  wandb_project: open-dllm-compare
+  wandb_name: 1.7b-50x-with-replay

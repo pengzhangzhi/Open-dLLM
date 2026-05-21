@@ -16,4 +16,5 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/precompute_anchor.py \
   --max_seq_len 160000 \
   --seed 42 \
   --force \
+  --max_examples 100 \
   --quantize 4bit

@@ -537,6 +537,44 @@ See the full LDLM section below for details.
 
 > **Bottom line**: If you have an off-the-shelf AR model and want diffusion capabilities with minimal compute, use **Repr-Align**. It's already built into the Qwen3.6 model implementations (`modeling_qwen3_5_moe.py`, `modeling_qwen3.py`, `modeling_qwen2.py`).
 
+### d3LLM-Style Trajectory Distillation (Masking Curriculum)
+
+Open-dLLM implements [**d3LLM**](https://arxiv.org/abs/2601.07568) (ICML 2026) trajectory-guided masking for Repr-Align training. Instead of random masking, the unmasking order from a teacher diffusion generation run determines the training-time mask pattern. Tokens that the teacher unmasked early are predicted first; tokens unmasked late are predicted later.
+
+**The problem with random masking**: Standard Repr-Align uses uniformly random masks during training. Random masks give the student model no signal about *which* tokens can be safely predicted with limited context — every position is equally likely to be masked, regardless of its predictability.
+
+**d3LLM's fix**: Pre-compute a *decoding trajectory* (the order in which tokens are unmasked during inference) by running `diffusion_generate()` on each training sample. During training, mask according to the trajectory step closest to the target mask ratio. This aligns training-time masking with inference-time decoding behavior.
+
+**Pipeline**:
+
+1. **Extract trajectories** (one-time pre-processing):
+```bash
+python -m veomni.ops.trajectory_extractor \
+    --model_path Qwen/Qwen3-1.7B \
+    --data_path /path/to/train.jsonl \
+    --output_dir /path/to/trajectories \
+    --max_seq_len 2048 \
+    --steps 256
+```
+
+2. **Train with trajectory-guided masking**:
+```yaml
+train:
+  enable_masking: true
+  repr_align_wt: 1.0
+  trajectory_data_path: /path/to/trajectories/trajectories.jsonl
+  trajectory_min_mask_ratio: 0.0
+  trajectory_max_mask_ratio: 0.8
+  trajectory_progressive_block_sizes: "16,24,32"
+  trajectory_use_blockwise: true
+  trajectory_entropy_weight: 1.0
+```
+
+**Key differences from the replay buffer**:
+- Replay buffer stores **past batches** to prevent forgetting (uniform sampling)
+- Trajectory distillation uses the **teacher's inference-time unmasking order** to guide masking (curriculum learning)
+- They are **complementary** — both can be enabled simultaneously (the replay buffer replays alignment loss, while trajectory distillation changes the masking pattern)
+
 ---
 
 ## 🧬 LDLM: Latent Diffusion Language Model

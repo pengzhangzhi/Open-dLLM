@@ -67,7 +67,10 @@ class MappingDataset(Dataset):
 
     def __getitem__(self, index: int) -> List[Dict[str, "torch.Tensor"]]:
         if self._transform is not None:
-            return self._transform(self._data[index])
+            try:
+                return self._transform(self._data[index], index=index)
+            except TypeError:
+                return self._transform(self._data[index])
         else:
             return self._data[index]
 

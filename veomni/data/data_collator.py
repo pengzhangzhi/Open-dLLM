@@ -213,8 +213,157 @@ class DataCollatorWithPositionIDsMasking(DataCollator):
             batch["labels"][batch["input_ids"] != self.mask_token_id] = IGNORE_INDEX
             
         return batch
-    
-    
+
+
+class DataCollatorWithTrajectoryMasking(DataCollator):
+    """Replace random masking with d3LLM-style trajectory-guided masking.
+
+    For each sample, the unmasking pattern from a pre-computed teacher
+    trajectory determines *which* tokens are masked at training time.
+    Tokens unmasked early in the trajectory are predicted first; tokens
+    unmasked late are predicted later.  This aligns training-time masking
+    with inference-time decoding order.
+
+    Adapted from d3LLM's ``forward_process_with_trajectory()``.
+
+    Args:
+        mask_token_id: ID of the [MASK] token.
+        trajectory_dataset: ``TrajectoryDataset`` instance for lookup.
+        current_mask_ratio: Target mask ratio for this training step
+            (scheduled by curriculum, typically 0.0 → 0.8 over training).
+        max_mask_ratio: Upper bound for jitter.
+        current_block_size: Block size for block-wise loss.
+        use_blockwise_loss: If True, only predict a random block per sample;
+            otherwise mask the entire response region.
+        use_complementary_loss: If True, also produce the inverse mask
+            pattern for dParallel-style dual loss.
+    """
+    def __init__(
+        self,
+        mask_token_id: int,
+        trajectory_dataset=None,
+        current_mask_ratio: float = 0.5,
+        max_mask_ratio: float = 0.8,
+        current_block_size: int = 32,
+        use_blockwise_loss: bool = False,
+    ):
+        self.mask_token_id = mask_token_id
+        self.trajectory_dataset = trajectory_dataset
+        self.current_mask_ratio = current_mask_ratio
+        self.max_mask_ratio = max_mask_ratio
+        self.current_block_size = current_block_size
+        self.use_blockwise_loss = use_blockwise_loss
+
+    def _select_trajectory_step(self, sample_idx, mask_ratio, block_start, block_end):
+        if self.trajectory_dataset is None:
+            return None
+        return self.trajectory_dataset.select_step(
+            sample_idx, mask_ratio, self.mask_token_id, block_start, block_end
+        )
+
+    def _mask_with_trajectory(self, input_ids, sample_idx):
+        b, l = input_ids.shape
+        device = input_ids.device
+        cur_mask_ratio = self.current_mask_ratio
+        cur_mask_ratio = cur_mask_ratio + torch.rand(1, device=device).item() * (
+            self.max_mask_ratio - cur_mask_ratio
+        )
+
+        masked = input_ids.clone()
+        masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
+
+        for i in range(b):
+            if self.use_blockwise_loss:
+                max_blocks = l // self.current_block_size
+                num_blocks = torch.randint(0, max_blocks + 1, (1,)).item()
+                mask_start = num_blocks * self.current_block_size
+                mask_end = min(
+                    mask_start + self.current_block_size,
+                    l,
+                )
+            else:
+                mask_start = 0
+                mask_end = l
+
+            traj_step = self._select_trajectory_step(
+                sample_idx[i].item() if sample_idx is not None else None,
+                cur_mask_ratio,
+                mask_start,
+                mask_end,
+            )
+
+            seg_len = mask_end - mask_start
+            if traj_step is not None:
+                traj_tensor = torch.tensor(
+                    traj_step, device=device, dtype=torch.long
+                )
+                seg_mask = traj_tensor[mask_start:mask_end] == self.mask_token_id
+            else:
+                p_mask = 0.999 * cur_mask_ratio + 0.001
+                seg_mask = torch.rand(seg_len, device=device) < p_mask
+
+            masked_indices[i, mask_start:mask_end] = seg_mask
+            masked[i, mask_start:mask_end] = torch.where(
+                seg_mask, self.mask_token_id, input_ids[i, mask_start:mask_end]
+            )
+            masked[i, mask_end:l] = self.mask_token_id
+
+        return masked, masked_indices
+
+    def __call__(self, features):
+        batch = {}
+        sample_indices = None
+
+        for input_name in features[0].keys():
+            if input_name == "input_ids":
+                input_ids = torch.cat(
+                    [f[input_name] for f in features], dim=-1
+                ).unsqueeze(0)
+                batch["casual_input_ids"] = input_ids.clone()
+
+                masked_ids, mask_idx = self._mask_with_trajectory(
+                    input_ids, sample_indices
+                )
+                batch[input_name] = masked_ids
+                batch["mask_ratio"] = torch.full(
+                    (input_ids.size(0),),
+                    self.current_mask_ratio,
+                    device=input_ids.device,
+                )
+                batch["left_mask"] = torch.zeros_like(
+                    input_ids, dtype=torch.float, device=input_ids.device
+                )
+                for j in range(1, input_ids.size(-1)):
+                    batch["left_mask"][..., j - 1] = mask_idx[..., j].float()
+
+            elif input_name in ("attention_mask", "labels", "position_ids"):
+                batch[input_name] = torch.cat(
+                    [f[input_name] for f in features], dim=-1
+                ).unsqueeze(0)
+            elif input_name == "sample_idx":
+                sample_indices = torch.tensor(
+                    [f[input_name] for f in features], dtype=torch.long
+                )
+                batch[input_name] = sample_indices
+            else:
+                batch[input_name] = default_collate(
+                    [f[input_name] for f in features]
+                )
+
+        if "position_ids" not in batch:
+            batch["position_ids"] = torch.cat(
+                [torch.arange(len(f["input_ids"])) for f in features]
+            ).unsqueeze(0)
+
+        if "labels" in batch:
+            batch["casual_labels"] = batch["labels"].clone()
+            cu_seqlens = pos2culen(batch["position_ids"])
+            batch["casual_labels"][:, cu_seqlens[1:-1]] = IGNORE_INDEX
+            batch["labels"][batch["input_ids"] != self.mask_token_id] = IGNORE_INDEX
+
+        return batch
+
+
 @dataclass
 class NoopDataCollator(DataCollator):
     """
