@@ -1,0 +1,11 @@
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/precompute_anchor.py \
+  --model_path /home/johndpope/ds_offload/models/Qwen3.6-27B \
+  --data_path /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl \
+  --output_dir /home/johndpope/ds_offload/anchors/qwen3.6-27b-260k \
+  --layers all \
+  --layer_batch 1 \
+  --max_seq_len 260000 \
+  --max_examples 1000 \
+  --seed 42 \
+  --gpu_id 0 \
+  --max_memory '{"0": "30GiB", "cpu": "80GiB"}'

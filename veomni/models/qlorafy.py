@@ -65,13 +65,18 @@ class QLoRAConfig:
             self.modules_to_save = []
 
 
-def _remap_vl_weights_into_lm_model(model: nn.Module, model_path: str) -> None:
-    """Reload LM weights from a VL checkpoint with key remapping.
+def _remap_vl_weights_into_lm_model(
+    model: nn.Module, model_path: str, target_device: Optional[str] = None
+) -> None:
+    """Load LM weights from a VL checkpoint with key remapping.
 
-    VL safetensors (e.g. Qwen3.6-27B) store language-model weights under
-    model.language_model.* but the veomni LM class expects model.*.
-    After from_pretrained loads random NF4 weights (key mismatch), this
-    function reloads the correct tensors and re-quantizes Linear4bit layers.
+    VL safetensors store LM weights under model.language_model.* but the
+    veomni LM class expects model.*. Loads shard-by-shard on CPU, remaps keys,
+    quantizes Linear4bit layers, and materialises any meta tensors on target_device.
+
+    Args:
+        target_device: Required when model was created with init_empty_weights().
+                       Meta tensors are materialised on this device (e.g. "cuda:0").
     """
     import json
     import os
@@ -109,39 +114,81 @@ def _remap_vl_weights_into_lm_model(model: nn.Module, model_path: str) -> None:
     except ImportError:
         has_bnb = False
 
+    try:
+        from accelerate.utils import set_module_tensor_to_device
+        has_set_module = True
+    except ImportError:
+        has_set_module = False
+
     n_loaded = 0
     for fname, entries in sorted(shard_to_entries.items()):
         shard_path = os.path.join(model_path, fname)
-        with safe_open(shard_path, framework="pt", device="cpu") as f:
-            shard_keys = set(f.keys())
+        with safe_open(shard_path, framework="pt", device="cpu") as sf:
+            shard_keys = set(sf.keys())
             for pname, vl_key in entries:
                 if vl_key not in shard_keys:
                     continue
-                tensor = f.get_tensor(vl_key)
+                tensor = sf.get_tensor(vl_key)
                 param = named_params[pname]
+                is_meta = param.device.type == "meta"
+                dest = target_device if (is_meta and target_device) else str(param.device)
 
                 if has_bnb and pname.endswith(".weight"):
                     parent_name = pname[: -len(".weight")]
                     parent = named_mods.get(parent_name)
                     if isinstance(parent, bnb.nn.Linear4bit):
-                        # Re-quantize the correct tensor into the Linear4bit weight
                         new_w = bnb.nn.Params4bit(
                             tensor.to(torch.bfloat16),
                             requires_grad=False,
                             quant_type="nf4",
-                        ).to(param.device)
+                        ).to(dest)
                         parent.weight = new_w
                         n_loaded += 1
                         continue
 
-                # Non-quantized param: direct copy
-                try:
-                    param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
-                    n_loaded += 1
-                except Exception as e:
-                    print(f"[qlorafy] Warning: could not load {pname}: {e}")
+                if is_meta and has_set_module:
+                    try:
+                        tgt_dtype = param.dtype if param.dtype not in (torch.float16,) else torch.bfloat16
+                        set_module_tensor_to_device(model, pname, dest, value=tensor.to(dtype=tgt_dtype))
+                        n_loaded += 1
+                    except Exception as e:
+                        print(f"[qlorafy] Warning: could not materialise meta {pname}: {e}")
+                else:
+                    try:
+                        param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
+                        n_loaded += 1
+                    except Exception as e:
+                        print(f"[qlorafy] Warning: could not load {pname}: {e}")
 
-    print(f"[qlorafy] VL remap: loaded {n_loaded}/{len(named_params)} params from {model_path}")
+    total = len(named_params)
+    print(f"[qlorafy] VL remap: loaded {n_loaded}/{total} params from {model_path}")
+
+    if target_device:
+        # Materialise any remaining meta tensors (e.g. GatedDeltaNet params whose VL keys
+        # use a different fused layout — in_proj_qkv vs split q/k/v — so they can't be
+        # directly mapped). Initialise with small random values so forward passes work.
+        still_meta = [(n, p) for n, p in model.named_parameters() if p.device.type == "meta"]
+        if still_meta:
+            print(f"[qlorafy] Initialising {len(still_meta)} unmapped meta params on {target_device}")
+            meta_mods = dict(model.named_modules())
+            for pname, param in still_meta:
+                parent_name = pname.rsplit(".", 1)[0] if "." in pname else ""
+                child_attr = pname.rsplit(".", 1)[-1] if "." in pname else pname
+                parent = meta_mods.get(parent_name, model)
+                shape = param.shape  # meta tensors retain shape info
+                if has_bnb and isinstance(parent, bnb.nn.Linear4bit) and child_attr == "weight":
+                    rand_data = torch.randn(shape, dtype=torch.bfloat16) * 0.02
+                    new_w = bnb.nn.Params4bit(rand_data, requires_grad=False, quant_type="nf4").to(target_device)
+                    parent.weight = new_w
+                elif has_set_module:
+                    tgt_dtype = torch.bfloat16 if param.dtype in (torch.float16, torch.bfloat16) else torch.float32
+                    zero_data = torch.zeros(shape, dtype=tgt_dtype)
+                    try:
+                        set_module_tensor_to_device(model, pname, target_device, value=zero_data)
+                    except Exception as e:
+                        print(f"[qlorafy] Warning: could not init meta {pname}: {e}")
+            remaining = sum(1 for _, p in model.named_parameters() if p.device.type == "meta")
+            print(f"[qlorafy] After init: {remaining} params still on meta")
 
 
 def build_qlorafied_model(
@@ -230,23 +277,63 @@ def build_qlorafied_model(
         model_cls = AutoModelForCausalLM
         load_trust_remote_code = trust_remote_code
 
-    max_memory = {0: "30GiB"} if torch.cuda.is_available() else None
-    model = model_cls.from_pretrained(
-        model_path,
-        config=load_config,
-        torch_dtype=torch_dtype,
-        quantization_config=bnb_config,
-        device_map="auto",
-        max_memory=max_memory,
-        trust_remote_code=load_trust_remote_code,
-        low_cpu_mem_usage=True,
-        **kwargs,
-    )
-
     if _needs_vl_remap:
-        # The VL safetensors use model.language_model.* keys but the LM class
-        # expects model.*. Reload weights with key remapping.
-        _remap_vl_weights_into_lm_model(model, model_path)
+        # For VL models (e.g. Qwen3.6-27B), safetensors use model.language_model.*
+        # but VeomniLM expects model.*. from_pretrained with the VL path would
+        # classify ALL 27B weights as "missing keys" and materialise them all on
+        # GPU at once via _move_missing_keys_from_meta_to_device → OOM.
+        #
+        # Instead: create an empty model shell (meta tensors), replace nn.Linear →
+        # Linear4bit inside init_empty_weights so the replacement layers also stay
+        # meta, then load shard-by-shard with key remapping onto cuda:0.
+        import bitsandbytes as bnb
+        from accelerate import init_empty_weights
+
+        compute_dtype_t = getattr(torch, config.bnb_4bit_compute_dtype)
+
+        to_replace = []  # (mod_name, new_Linear4bit) — collected inside context
+        with init_empty_weights():
+            model = model_cls(load_config)
+            # Snapshot linear layers, create Linear4bit replacements while context
+            # is active so their weight tensors also stay on meta.
+            for mod_name, mod in model.named_modules():
+                if isinstance(mod, nn.Linear) and "lm_head" not in mod_name:
+                    new_linear = bnb.nn.Linear4bit(
+                        mod.in_features,
+                        mod.out_features,
+                        bias=mod.bias is not None,
+                        compute_dtype=compute_dtype_t,
+                        compress_statistics=config.bnb_4bit_use_double_quant,
+                        quant_type=config.bnb_4bit_quant_type,
+                    )
+                    to_replace.append((mod_name, new_linear))
+
+        # Apply replacements outside the context (objects retain meta weights)
+        module_map = dict(model.named_modules())
+        for mod_name, new_linear in to_replace:
+            if "." in mod_name:
+                parent_name, child_name = mod_name.rsplit(".", 1)
+            else:
+                parent_name, child_name = "", mod_name
+            parent = module_map[parent_name] if parent_name else model
+            setattr(parent, child_name, new_linear)
+
+        # Load actual weights from VL safetensors, materialise on cuda:0
+        target = "cuda:0" if torch.cuda.is_available() else "cpu"
+        _remap_vl_weights_into_lm_model(model, model_path, target_device=target)
+    else:
+        max_memory = {0: "30GiB"} if torch.cuda.is_available() else None
+        model = model_cls.from_pretrained(
+            model_path,
+            config=load_config,
+            torch_dtype=torch_dtype,
+            quantization_config=bnb_config,
+            device_map="auto",
+            max_memory=max_memory,
+            trust_remote_code=load_trust_remote_code,
+            low_cpu_mem_usage=True,
+            **kwargs,
+        )
 
     model.train()
 
@@ -256,7 +343,10 @@ def build_qlorafied_model(
         pre_lora_mem = 0
 
     peft_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
+        # FEATURE_EXTRACTION avoids PeftModelForCausalLM which requires
+        # prepare_inputs_for_generation — absent in transformers 5.x PreTrainedModel.
+        # Forward pass and gradient flow are identical for repr-align training.
+        task_type=TaskType.FEATURE_EXTRACTION,
         r=config.r,
         lora_alpha=config.lora_alpha,
         lora_dropout=config.lora_dropout,

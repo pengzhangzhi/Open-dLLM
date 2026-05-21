@@ -68,6 +68,17 @@ _CHECKPOINT_FOR_DOC = "Qwen/Qwen3.6-27B"
 _CONFIG_FOR_DOC = "Qwen3_5Config"
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """Repeat KV heads for grouped-query attention.
+    (batch, num_key_value_heads, seqlen, head_dim) → (batch, num_key_value_heads*n_rep, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
 def repr_align_loss_fn(z1, z2):
     z1_norm = nn.functional.normalize(z1, p=2, dim=-1)
     z2_norm = nn.functional.normalize(z2, p=2, dim=-1)
@@ -107,7 +118,7 @@ class Qwen3_5RMSNormGated(nn.Module):
         self.gate = nn.Linear(hidden_size, hidden_size, bias=False)
 
     def forward(self, hidden_states):
-        return self.norm(hidden_states) * torch.silu(self.gate(hidden_states))
+        return self.norm(hidden_states) * F.silu(self.gate(hidden_states))
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +287,7 @@ class Qwen3_5Attention(nn.Module):
         from torch.nn.functional import scaled_dot_product_attention as sdpa
         key = repeat_kv(key, self.num_key_value_groups)
         value = repeat_kv(value, self.num_key_value_groups)
-        return sdpa(query, key, value, attn_mask=attention_mask, dropout=0.0, is_causal=self.is_causal).transpose(1, 2).contiguous()
+        return sdpa(query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=self.is_causal).transpose(1, 2).contiguous()
 
     def _eager_forward(self, query, key, value, attention_mask):
         B, H, S, D = query.shape
@@ -369,24 +380,24 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         g = self.gate_proj(hidden_states)                    # (B, S, n_key_heads * head_dim)
         beta = self.beta_proj(hidden_states)                 # (B, S, n_key_heads * head_dim)
 
-        # Partial RoPE on q and k
-        q, k = apply_rotary_pos_emb_partial(q, k, cos, sin, self.rotary_dim)
-
-        # Reshape
+        # Reshape q/k to 4-D before rotary (apply_rotary_pos_emb_partial expects (B,H,S,D))
         q = q.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)     # (B, H, S, D)
         k = k.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)  # (B, H, S, Dk)
         v = v.view(B, S, self.linear_num_value_heads, self.linear_value_head_dim).transpose(1, 2)  # (B, H, S, Dv)
         g = g.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)     # (B, H, S, D)
         beta = beta.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)  # (B, H, S, D)
 
+        # Partial RoPE on q and k (both 4-D now)
+        q, k = apply_rotary_pos_emb_partial(q, k, cos, sin, self.rotary_dim)
+
         # Apply conv to k and v
+        # k/v are (B, H, S, D). k_conv expects (B, H*D, S) with groups=H.
+        # Even kernel_size with symmetric padding gives output length S+1; trim to S.
         if self.linear_conv_kernel_dim > 1:
-            k_reshaped = k.transpose(1, 2).reshape(B * self.linear_num_key_heads, S, self.linear_key_head_dim)
-            v_reshaped = v.transpose(1, 2).reshape(B * self.linear_num_value_heads, S, self.linear_value_head_dim)
-            k_reshaped = self.k_conv(k_reshaped.transpose(1, 2)).transpose(1, 2).reshape(B, self.linear_num_key_heads, S, self.linear_key_head_dim)
-            v_reshaped = self.v_conv(v_reshaped.transpose(1, 2)).transpose(1, 2).reshape(B, self.linear_num_value_heads, S, self.linear_value_head_dim)
-            k = k_reshaped
-            v = v_reshaped
+            k_in = k.permute(0, 1, 3, 2).reshape(B, self.linear_num_key_heads * self.linear_key_head_dim, S)
+            k = self.k_conv(k_in)[..., :S].reshape(B, self.linear_num_key_heads, self.linear_key_head_dim, S).permute(0, 1, 3, 2)
+            v_in = v.permute(0, 1, 3, 2).reshape(B, self.linear_num_value_heads * self.linear_value_head_dim, S)
+            v = self.v_conv(v_in)[..., :S].reshape(B, self.linear_num_value_heads, self.linear_value_head_dim, S).permute(0, 1, 3, 2)
 
         # Handle recurrent cache for decode
         if past_key_value is not None:
