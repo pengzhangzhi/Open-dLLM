@@ -41,6 +41,7 @@ from transformers.utils import (
 )
 
 from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
+from veomni.models.transformers.qwen2.multi_block_generation import MultiBlockDecoderMixin
 from veomni.models.transformers.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
 from veomni.models.transformers.qwen3_5.delta_rule import (
     chunk_gated_delta_rule_pytorch,
@@ -749,7 +750,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
 class KwargsForCausalLM: ...
 
 
-class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
+class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin, MultiBlockDecoderMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
