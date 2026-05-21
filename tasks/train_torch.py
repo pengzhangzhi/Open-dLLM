@@ -25,6 +25,7 @@ from veomni.data import (
     build_mapping_dataset,
 )
 from veomni.data.data_transform import process_pretrain_example, process_sft_example
+from veomni.data.constants import IGNORE_INDEX
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
@@ -714,6 +715,9 @@ def main():
                             from torch.nn import functional as _F
                             _logits_s = _logits[:, :-1].float()
                             _labels_s = _labels[:, 1:]
+                            _L = min(_logits_s.shape[1], _labels_s.shape[1])
+                            _logits_s = _logits_s[:, :_L]
+                            _labels_s = _labels_s[:, :_L]
                             _mask = _labels_s != IGNORE_INDEX
                             if _mask.any():
                                 _temp = getattr(args.train, "trajectory_temperature", 0.5)

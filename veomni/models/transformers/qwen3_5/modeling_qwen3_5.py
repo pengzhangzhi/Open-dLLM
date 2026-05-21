@@ -335,15 +335,15 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.scaling = self.linear_key_head_dim ** -0.5
         self.use_fla = is_fla_available()
 
-        self.q_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.head_dim, bias=False)
+        self.q_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.linear_key_head_dim, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.linear_key_head_dim, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, self.linear_num_value_heads * self.linear_value_head_dim, bias=False)
         self.o_proj = nn.Linear(self.linear_num_value_heads * self.linear_value_head_dim, config.hidden_size, bias=False)
 
         # Input gate for delta rule
-        self.gate_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.head_dim, bias=False)
+        self.gate_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.linear_key_head_dim, bias=False)
         # Beta (forget gate) projection — learns the decay rate
-        self.beta_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.head_dim, bias=False)
+        self.beta_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.linear_key_head_dim, bias=False)
 
         # Conv projections for key and value
         if self.linear_conv_kernel_dim > 1:
@@ -384,11 +384,11 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         beta = self.beta_proj(hidden_states)                 # (B, S, n_key_heads * head_dim)
 
         # Reshape q/k to 4-D before rotary (apply_rotary_pos_emb_partial expects (B,H,S,D))
-        q = q.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)     # (B, H, S, D)
+        q = q.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)     # (B, H, S, D)
         k = k.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)  # (B, H, S, Dk)
         v = v.view(B, S, self.linear_num_value_heads, self.linear_value_head_dim).transpose(1, 2)  # (B, H, S, Dv)
-        g = g.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)     # (B, H, S, D)
-        beta = beta.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)  # (B, H, S, D)
+        g = g.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)     # (B, H, S, D)
+        beta = beta.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)  # (B, H, S, D)
 
         # Partial RoPE on q and k (both 4-D now)
         q, k = apply_rotary_pos_emb_partial(q, k, cos, sin, self.rotary_dim)
