@@ -363,8 +363,15 @@ The repo supports three ways of producing a diffusion LM (don't confuse them):
 If the user says "train a diffusion model" without specifying, ask which path they want. Repr-Align is the default recommendation for converting an existing AR model.
 
 ### Repr-Align anchor precomputation
-Before training with `repr_align_wt > 0`, precompute teacher hidden states once:
+Before training with `repr_align_wt > 0`, precompute teacher hidden states once.
 
+**Practical notes:**
+- For 27B+ models, **4-bit quantization** (`--quantize 4bit`) is required to fit on a 32 GB GPU. Without it, CPU-offloaded layers produce NaN due to Gated DeltaNet attention kernels running on CPU.
+- Uses **forward hooks** (not `output_hidden_states=True`) to avoid storing all 65+ layer hidden states on GPU — each hook immediately CPU-copies its layer's output.
+- Output includes `manifest.json` for `CachedTeacher` compatibility.
+- Pre-built script for the 27B model: `bash scripts/dump-anchors.sh`
+
+**Small model example:**
 ```bash
 python scripts/precompute_anchor.py \
     --model_path Qwen/Qwen3-1.7B \
@@ -375,7 +382,24 @@ python scripts/precompute_anchor.py \
     --max_examples 1000   # omit for full dataset
 ```
 
+**27B model example (4-bit, RTX 5090):**
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/precompute_anchor.py \
+    --model_path /home/johndpope/ds_offload/models/Qwen3.6-27B \
+    --data_path /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl \
+    --output_dir /run/media/johndpope/12TB/open_dllm/anchors/qwen3.6-27b-160k \
+    --layers "16,32,48,64" \
+    --max_seq_len 160000 \
+    --force \
+    --quantize 4bit
+```
+
 Cache contract: one `.safetensors` file per sequence chunk, keyed by SHA-256 of `input_ids`, stored in a 2-char prefix subdirectory. The trainer's `CachedTeacher` (in `veomni/models/cached_teacher.py`) splits packed rmpad rows via `position_ids` before lookup. Cache 4–8 selected layers (not all 40) to stay under 7 TB for a 35B model.
+
+**Storage estimates for 100k FineWeb chunks (avg 658 tokens, hidden_size=5120, 4 layers, bf16):**
+- Per chunk: ~27 MB
+- Total: ~2.7 TB
+- At ~3.2 chunks/sec write speed: ~10 hours for full 100k, or ~4 hours until 1.3 TB disk fills
 
 ## Local Data & Models
 
@@ -436,7 +460,7 @@ Or open https://cloud.vast.ai/billing/ in a browser to see running charges.
 ### On-instance paths
 ```
 /data/models/Qwen3.6-27B/          # model weights
-/data/anchors/qwen3.6-27b/         # precomputed Repr-Align anchor cache (1085 files, 27 GB)
+/data/anchors/qwen3.6-27b-160k/    # precomputed Repr-Align anchor cache (4 layers, 160k ctx, ~45k files)
 /data/training/data_smoke_1000.jsonl
 /data/checkpoints/qwen3.6-27b-repr-align/
 /data/ds_offload/                  # DeepSpeed NVMe offload scratch

@@ -94,6 +94,8 @@ def main():
     ap.add_argument("--device_map", default="auto")
     ap.add_argument("--max_memory", default=None,
                     help='e.g. \'{"0": "28GiB", "cpu": "80GiB"}\'')
+    ap.add_argument("--quantize", default=None, choices=["8bit", "4bit", None],
+                    help="Quantize model with bitsandbytes (8bit or 4bit)")
     ap.add_argument("--force", action="store_true",
                     help="Overwrite existing cache files")
     args = ap.parse_args()
@@ -118,6 +120,15 @@ def main():
         low_cpu_mem_usage=True,
         device_map=args.device_map,
     )
+    if args.quantize:
+        from transformers import BitsAndBytesConfig
+        bnb_kwargs = dict(
+            load_in_4bit=args.quantize == "4bit",
+            load_in_8bit=args.quantize == "8bit",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(**bnb_kwargs)
     if args.max_memory:
         raw = json.loads(args.max_memory)
         model_kwargs["max_memory"] = {
