@@ -90,5 +90,4 @@ train:
   wandb_project: open-dllm-27b-local
   wandb_name: qwen3.6-27b-local-repr-align-ds
 
-  wandb_resume: allow
-  wandb_id: null
+

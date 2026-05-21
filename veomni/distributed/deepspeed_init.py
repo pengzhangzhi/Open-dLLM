@@ -98,6 +98,12 @@ def init_deepspeed_engine(
     The engine wraps the model; access original via ``engine.module``.
     """
     import deepspeed
+    from deepspeed.accelerator import get_accelerator
+
+    # Monkey-patch pin_memory to no-op during engine init to avoid
+    # CUDA OOM when pinning the 27 GB fp16 flat buffer on a small GPU.
+    _orig_pin_memory = get_accelerator().pin_memory
+    get_accelerator().pin_memory = lambda x: x
 
     engine, ds_optimizer, _, ds_lr_scheduler = deepspeed.initialize(
         model=model,
@@ -105,6 +111,8 @@ def init_deepspeed_engine(
         lr_scheduler=lr_scheduler,
         config_params=ds_config,
     )
+
+    get_accelerator().pin_memory = _orig_pin_memory
 
     logger.info_rank0(
         f"DeepSpeed engine initialized. ZeRO stage={train_args.ds_zero_stage}, "
