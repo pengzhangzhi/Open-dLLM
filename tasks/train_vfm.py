@@ -40,29 +40,99 @@ class VFMArguments:
     train: "TrainingArguments" = field(default_factory=TrainingArguments)
 
 
+def _load_vl_lm_for_vfm(model_path: str, torch_dtype) -> "torch.nn.Module":
+    """Load a VL model's LM backbone as a plain nn.Module.
+
+    Handles Qwen3.6-27B whose safetensors store LM weights under
+    model.language_model.* but the LM class expects model.*.
+    Falls back to AutoModelForCausalLM for plain LM models.
+    """
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+    if not hasattr(hf_config, "text_config"):
+        return AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            device_map="cpu",
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        )
+
+    text_cfg = hf_config.text_config
+    model_type = getattr(text_cfg, "model_type", "")
+
+    if model_type not in ("qwen3_5", "qwen3_5_text"):
+        return AutoModelForCausalLM.from_pretrained(
+            model_path,
+            config=text_cfg,
+            torch_dtype=torch_dtype,
+            device_map="cpu",
+            trust_remote_code=True,
+        )
+
+    from veomni.models.qlorafy import _remap_vl_weights_into_lm_model
+    from veomni.models.transformers.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+    from veomni.models.transformers.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM as VeomniLM
+
+    cfg_dict = text_cfg.to_dict()
+    rope_params = cfg_dict.pop("rope_parameters", {}) or {}
+    for k, default in [
+        ("rope_theta", 10_000_000.0),
+        ("mrope_interleaved", True),
+        ("mrope_section", [11, 11, 10]),
+        ("partial_rotary_factor", 0.25),
+    ]:
+        if cfg_dict.get(k) is None:
+            cfg_dict[k] = rope_params.get(k, default)
+    cfg_dict.pop("model_type", None)
+    cfg_dict.setdefault("pad_token_id", getattr(text_cfg, "pad_token_id", 0) or 0)
+
+    model = VeomniLM(Qwen3_5Config(**cfg_dict)).to(torch_dtype)
+    _remap_vl_weights_into_lm_model(model, model_path)
+    return model
+
+
 def build_vfm_model(args, tokenizer):
-    """Build VFM model from a pretrained bidirectional LLM + noise adapter."""
+    """Build VFM model from a pretrained bidirectional LLM + noise adapter.
+
+    If vfm.peft_checkpoint is set, loads the base model and merges LoRA adapters
+    from that checkpoint — use this to initialize VFM from a repr-align trained model.
+    """
     from transformers import AutoConfig, AutoModelForCausalLM
 
     model_path = args.model.model_path
     logger.info_rank0(f"Loading base model from {model_path}")
 
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    vfm_cfg = getattr(args.model, "vfm", {}) or {}
+    peft_ckpt = vfm_cfg.get("peft_checkpoint", None)
 
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        device_map="cpu",
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-    )
+    if peft_ckpt:
+        from peft import PeftModel
+
+        logger.info_rank0(f"Loading base LM for VFM (VL remap if needed)")
+        base_model = _load_vl_lm_for_vfm(model_path, torch_dtype=torch.bfloat16)
+        logger.info_rank0(f"Attaching + merging PEFT adapters from {peft_ckpt}")
+        base_model = PeftModel.from_pretrained(base_model, peft_ckpt)
+        base_model = base_model.merge_and_unload()
+        config = base_model.config
+    else:
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="cpu",
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        )
 
     if len(tokenizer) > base_model.get_input_embeddings().weight.shape[0]:
         base_model.resize_token_embeddings(len(tokenizer))
     hidden_size = config.hidden_size
     vocab_size = base_model.get_input_embeddings().weight.shape[0]
 
-    vfm_cfg = getattr(args.model, "vfm", {}) or {}
     vfm = VariationalFlowMap(
         model=base_model,
         hidden_size=hidden_size,
@@ -224,6 +294,7 @@ def main():
     # ------------------------------------------------------------------
     logger.info_rank0("Building VFM model")
     vfm, model_config = build_vfm_model(args, tokenizer)
+    vfm_cfg = getattr(args.model, "vfm", {}) or {}
 
     device = torch.device(f"cuda:{args.train.local_rank}")
     vfm = vfm.to(device)
@@ -377,6 +448,52 @@ def main():
                         step_loss_components.get("vfm/kl_loss", 0.0)
                         + fwd_out["kl_loss"].item() / len(micro_batches)
                     )
+
+                    # DifferentialReplayLoss: distill T-step VFM trajectory → S steps.
+                    # Teacher runs T Euler steps (no_grad); student runs S steps with gradients.
+                    # Velocity: flow_map(z).reconstructed - z (straight-line ODE in embedding space).
+                    _dr_wt = vfm_cfg.get("diff_replay_wt", 0.0)
+                    if _dr_wt > 0 and fwd_out.get("z_gen") is not None:
+                        from veomni.ops.differential_replay import DifferentialReplayLoss
+
+                        _T = vfm_cfg.get("diff_replay_teacher_steps", 8)
+                        _S = vfm_cfg.get("diff_replay_student_steps", 4)
+                        _z_init = fwd_out["z_gen"]          # [B, G, D] — noise at generation positions
+                        _z_full_base = fwd_out["z_full"]    # [B, L, D] — full sequence (prompt+gen)
+                        _gen_mask = fwd_out["gen_mask"]     # [B, L] bool
+                        _attn_mask = micro_batch.get("attention_mask")
+
+                        def _velocity_fn(z_gen: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+                            """Compute velocity at generation positions only."""
+                            z_full = _z_full_base.clone().detach()
+                            for b in range(z_full.shape[0]):
+                                gen_pos = _gen_mask[b].nonzero(as_tuple=True)[0]
+                                gp = min(len(gen_pos), z_gen.shape[1])
+                                z_full[b, gen_pos[:gp]] = z_gen[b, :gp]
+                            _, recon = vfm.flow_map(z_full.to(z_gen.dtype), _attn_mask)
+                            v = torch.zeros_like(z_gen)
+                            for b in range(z_full.shape[0]):
+                                gen_pos = _gen_mask[b].nonzero(as_tuple=True)[0]
+                                gp = min(len(gen_pos), z_gen.shape[1])
+                                v[b, :gp] = recon[b, gen_pos[:gp]] - z_gen[b, :gp]
+                            return v
+
+                        _t_sigs = torch.linspace(1.0, 0.0, _T + 1, device=device)
+                        _s_sigs = torch.linspace(1.0, 0.0, _S + 1, device=device)
+                        _dr_loss_fn = DifferentialReplayLoss(teacher_steps=_T, student_steps=_S)
+                        _dr_loss, _ = _dr_loss_fn(
+                            z_init=_z_init,
+                            teacher_denoise_fn=_velocity_fn,
+                            student_denoise_fn=_velocity_fn,
+                            teacher_sigmas=_t_sigs,
+                            student_sigmas=_s_sigs,
+                        )
+                        if torch.isfinite(_dr_loss):
+                            loss_tensor = loss_tensor + _dr_wt * _dr_loss / len(micro_batches)
+                            step_loss_components["vfm/diff_replay_loss"] = (
+                                step_loss_components.get("vfm/diff_replay_loss", 0.0)
+                                + _dr_loss.item() / len(micro_batches)
+                            )
 
                 with model_bwd_context:
                     loss_tensor.backward()

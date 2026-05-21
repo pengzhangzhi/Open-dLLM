@@ -1020,6 +1020,16 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
         else:
             result.loss_components = {}
 
+        # Expose repr_align hidden states for DifferentialReplayLoss in the training loop.
+        # student_hidden_states retains grad (flows through LoRA adapters).
+        # teacher_hidden_states is detached (computed under no_grad).
+        if _repr_align_active and teacher_outputs is not None:
+            result.repr_align_student_states = student_hidden_states  # tuple([B, L, D], ...)
+            result.repr_align_teacher_states = teacher_hidden_states  # tuple([B, L, D], ...)
+        else:
+            result.repr_align_student_states = None
+            result.repr_align_teacher_states = None
+
         return result
 
 

@@ -319,6 +319,23 @@ class TrainingArguments:
         },
     )
     # ------------------------------------------------------------------
+    # DifferentialReplayLoss — distills T-step hidden-state trajectory → S steps.
+    # Requires repr_align_wt > 0 (uses the same student/teacher hidden states).
+    # Off when diff_replay_wt == 0.
+    # ------------------------------------------------------------------
+    diff_replay_wt: float = field(
+        default=0.0,
+        metadata={"help": "Weight for DifferentialReplayLoss (0 = disabled). Requires repr_align_wt > 0."},
+    )
+    diff_replay_teacher_steps: int = field(
+        default=8,
+        metadata={"help": "Number of Euler steps for the teacher trajectory in DifferentialReplayLoss."},
+    )
+    diff_replay_student_steps: int = field(
+        default=4,
+        metadata={"help": "Number of Euler steps for the student trajectory in DifferentialReplayLoss."},
+    )
+    # ------------------------------------------------------------------
     # Cola DLM (Continuous Latent Diffusion LM, arXiv:2605.06548)
     # auxiliary head on top of Repr-Align. Off when cola_wt == 0.
     # See veomni/models/cola_ldm/.

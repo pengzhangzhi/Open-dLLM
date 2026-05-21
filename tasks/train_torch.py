@@ -621,6 +621,37 @@ def main():
                     for name, value in loss_components.items():
                         step_loss_components[name] = step_loss_components.get(name, 0.0) + value / len(micro_batches)
 
+                    # DifferentialReplayLoss over the repr_align hidden states.
+                    # Teacher velocity: (teacher_hs - z), Student velocity: (student_hs - z).
+                    # No extra forward passes — reuses states already computed by repr_align.
+                    _dr_wt = getattr(args.train, "diff_replay_wt", 0.0)
+                    if _dr_wt > 0:
+                        _s_states = getattr(outputs, "repr_align_student_states", None)
+                        _t_states = getattr(outputs, "repr_align_teacher_states", None)
+                        if _s_states is not None and _t_states is not None:
+                            from veomni.ops.differential_replay import DifferentialReplayLoss
+                            # Use last align layer: [B, L, D]
+                            _z_student = _s_states[-1]
+                            _z_teacher = _t_states[-1].detach()
+                            _z_init = _z_student.detach()
+                            _T = getattr(args.train, "diff_replay_teacher_steps", 8)
+                            _S = getattr(args.train, "diff_replay_student_steps", 4)
+                            _t_sigs = torch.linspace(1.0, 0.0, _T + 1, device=loss_tensor.device)
+                            _s_sigs = torch.linspace(1.0, 0.0, _S + 1, device=loss_tensor.device)
+                            _dr_loss, _ = DifferentialReplayLoss(teacher_steps=_T, student_steps=_S)(
+                                z_init=_z_init,
+                                teacher_denoise_fn=lambda z, sigma: (_z_teacher - z),
+                                student_denoise_fn=lambda z, sigma: (_z_student - z),
+                                teacher_sigmas=_t_sigs,
+                                student_sigmas=_s_sigs,
+                            )
+                            if torch.isfinite(_dr_loss):
+                                loss_tensor = loss_tensor + _dr_wt * _dr_loss / len(micro_batches)
+                                step_loss_components["diff_replay"] = (
+                                    step_loss_components.get("diff_replay", 0.0)
+                                    + _dr_loss.item() / len(micro_batches)
+                                )
+
                     step_has_nan = not torch.isfinite(loss_tensor)
                     if step_has_nan and args.train.local_rank == 0:
                         comp_str = ", ".join(f"{k}={v:.4f}" for k, v in loss_components.items())
@@ -853,30 +884,35 @@ def main():
 
             if save_step or eval_step:
                 helper.empty_cache()
+                is_qlora = getattr(args.model, 'enable_qlorafy', False)
+                skip_dcp = is_qlora or not args.train.save_optimizer_state
+
                 if save_step:
                     save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, f"global_step_{global_step}")
                 elif eval_step:
                     save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, "eval")
                 else:
                     raise ValueError("Invalid save or eval step")
-                print(f"save_checkpoint_path: {save_checkpoint_path}")
-                state = {
-                    "model": model,
-                    "optimizer": optimizer,
-                    "extra_state": {
-                        "global_step": global_step,
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "train_dataloader": train_dataloader.state_dict(),
-                        "environ_meter": environ_meter.state_dict(),
-                        "torch_rng_state": torch.get_rng_state(),
-                    },
-                }
-                if args.train.save_optimizer_state:
+
+                if not skip_dcp:
+                    os.makedirs(save_checkpoint_path, exist_ok=True)
+                    state = {
+                        "model": model,
+                        "optimizer": optimizer,
+                        "extra_state": {
+                            "global_step": global_step,
+                            "lr_scheduler": lr_scheduler.state_dict(),
+                            "train_dataloader": train_dataloader.state_dict(),
+                            "environ_meter": environ_meter.state_dict(),
+                            "torch_rng_state": torch.get_rng_state(),
+                        },
+                    }
                     Checkpointer.save(save_checkpoint_path, state)
                     logger.info_rank0(f"Checkpoint saved to {save_checkpoint_path}")
                 else:
                     os.makedirs(save_checkpoint_path, exist_ok=True)
-                    logger.info_rank0("Skipping ZeRO checkpoint (save_optimizer_state=False); HF weights only.")
+                    logger.info_rank0("Skipping DCP checkpoint (QLoRA/Params4bit or save_optimizer_state=False); adapter weights only.")
+
                 if args.train.global_rank == 0 and args.train.save_total_limit > 0:
                     _prune_old_checkpoints(args.train.save_checkpoint_path, args.train.save_total_limit)
 
@@ -886,14 +922,24 @@ def main():
 
                 if args.train.global_rank == 0 and args.train.save_hf_weights:
                     hf_weights_path = os.path.join(save_checkpoint_path, "hf_ckpt")
-                    logger.info(f"Converting checkpoint from {save_checkpoint_path} to HF format")
-                    model_state_dict = ckpt_to_state_dict(
-                        save_checkpoint_path=save_checkpoint_path,
-                        output_dir=args.train.output_dir,
-                        ckpt_manager=args.train.ckpt_manager,
-                    )
-                    save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
-                    logger.info_rank0(f"Huggingface checkpoint saved at {hf_weights_path} successfully!")
+                    if is_qlora:
+                        from peft import PeftModel
+                        if isinstance(model, PeftModel):
+                            model.save_pretrained(hf_weights_path)
+                            logger.info_rank0(f"PEFT adapter saved at {hf_weights_path}")
+                        else:
+                            adapter_state = {n: p.data for n, p in model.named_parameters() if p.requires_grad}
+                            save_model_weights(hf_weights_path, adapter_state, model_assets=model_assets)
+                            logger.info_rank0(f"Trainable weights saved at {hf_weights_path}")
+                    else:
+                        logger.info(f"Converting checkpoint from {save_checkpoint_path} to HF format")
+                        model_state_dict = ckpt_to_state_dict(
+                            save_checkpoint_path=save_checkpoint_path,
+                            output_dir=args.train.output_dir,
+                            ckpt_manager=args.train.ckpt_manager,
+                        )
+                        save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
+                        logger.info_rank0(f"Huggingface checkpoint saved at {hf_weights_path} successfully!")
 
                     # Run HumanEval evaluation
                     eval_output_path = os.path.join(save_checkpoint_path, "humaneval")

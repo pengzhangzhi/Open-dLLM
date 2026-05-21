@@ -293,6 +293,10 @@ class VariationalFlowMap(nn.Module):
             "logits": logits,
             "reconstructed": reconstructed,
             "z_gen": z_gen,
+            # Exposed for DifferentialReplayLoss in the training loop
+            "z_full": z_full.detach(),
+            "all_embeds": all_embeds.detach(),
+            "gen_mask": gen_mask,
         }
 
     @torch.no_grad()

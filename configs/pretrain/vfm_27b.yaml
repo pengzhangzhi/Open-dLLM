@@ -13,6 +13,9 @@ model:
   model_path: /home/johndpope/ds_offload/models/Qwen3.6-27B
   attn_implementation: sdpa
   vfm:
+    # Load repr-align trained 27B (QLoRA checkpoint) as the flow map base.
+    # merge_and_unload() produces a bf16 model with bidirectional + LoRA weights baked in.
+    peft_checkpoint: /home/johndpope/ds_offload/checkpoints/qlorafy-27b-train/checkpoints/eval/hf_ckpt
     adapter_layers: 4
     adapter_heads: 8
     tau: 1.0
@@ -20,6 +23,10 @@ model:
     alpha: 0.5
     freeze_base: true
     max_seq_len: 1024
+    # DifferentialReplayLoss: distill T-step trajectory → S-step student
+    diff_replay_wt: 0.1
+    diff_replay_teacher_steps: 8
+    diff_replay_student_steps: 4
 
 data:
   train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl

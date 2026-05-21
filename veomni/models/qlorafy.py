@@ -65,6 +65,85 @@ class QLoRAConfig:
             self.modules_to_save = []
 
 
+def _remap_vl_weights_into_lm_model(model: nn.Module, model_path: str) -> None:
+    """Reload LM weights from a VL checkpoint with key remapping.
+
+    VL safetensors (e.g. Qwen3.6-27B) store language-model weights under
+    model.language_model.* but the veomni LM class expects model.*.
+    After from_pretrained loads random NF4 weights (key mismatch), this
+    function reloads the correct tensors and re-quantizes Linear4bit layers.
+    """
+    import json
+    import os
+
+    from safetensors import safe_open
+
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        print("[qlorafy] No safetensors index found; skipping VL weight remap.")
+        return
+
+    with open(index_path) as f:
+        weight_map = json.load(f)["weight_map"]
+
+    def to_vl_key(model_key: str) -> str:
+        # lm_head.weight stays the same; model.* → model.language_model.*
+        if model_key.startswith("model."):
+            return "model.language_model." + model_key[len("model."):]
+        return model_key
+
+    named_mods = dict(model.named_modules())
+    named_params = dict(model.named_parameters())
+
+    # Map each model param to the shard that holds its VL-key counterpart
+    shard_to_entries: dict = {}
+    for pname in named_params:
+        vl_key = to_vl_key(pname)
+        if vl_key in weight_map:
+            fname = weight_map[vl_key]
+            shard_to_entries.setdefault(fname, []).append((pname, vl_key))
+
+    try:
+        import bitsandbytes as bnb
+        has_bnb = True
+    except ImportError:
+        has_bnb = False
+
+    n_loaded = 0
+    for fname, entries in sorted(shard_to_entries.items()):
+        shard_path = os.path.join(model_path, fname)
+        with safe_open(shard_path, framework="pt", device="cpu") as f:
+            shard_keys = set(f.keys())
+            for pname, vl_key in entries:
+                if vl_key not in shard_keys:
+                    continue
+                tensor = f.get_tensor(vl_key)
+                param = named_params[pname]
+
+                if has_bnb and pname.endswith(".weight"):
+                    parent_name = pname[: -len(".weight")]
+                    parent = named_mods.get(parent_name)
+                    if isinstance(parent, bnb.nn.Linear4bit):
+                        # Re-quantize the correct tensor into the Linear4bit weight
+                        new_w = bnb.nn.Params4bit(
+                            tensor.to(torch.bfloat16),
+                            requires_grad=False,
+                            quant_type="nf4",
+                        ).to(param.device)
+                        parent.weight = new_w
+                        n_loaded += 1
+                        continue
+
+                # Non-quantized param: direct copy
+                try:
+                    param.data.copy_(tensor.to(dtype=param.dtype, device=param.device))
+                    n_loaded += 1
+                except Exception as e:
+                    print(f"[qlorafy] Warning: could not load {pname}: {e}")
+
+    print(f"[qlorafy] VL remap: loaded {n_loaded}/{len(named_params)} params from {model_path}")
+
+
 def build_qlorafied_model(
     model_path: str,
     config: QLoRAConfig = None,
@@ -107,12 +186,41 @@ def build_qlorafied_model(
 
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
 
+    _needs_vl_remap = False
     if hasattr(hf_config, "text_config") and hasattr(hf_config.text_config, "model_type"):
+        # VL model (e.g. Qwen3.6-27B): safetensors store LM weights under
+        # model.language_model.* but the LM-only class expects model.*.
+        # Use the veomni Qwen3_5ForCausalLM which has repr_align_wt support,
+        # then remap weights after loading.
         text_cfg = hf_config.text_config
-        text_cfg.pad_token_id = text_cfg.pad_token_id or 0
-        load_config = text_cfg
-        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
-        model_cls = Qwen3_5ForCausalLM
+        model_type = getattr(text_cfg, "model_type", "")
+        if model_type in ("qwen3_5", "qwen3_5_text"):
+            from veomni.models.transformers.qwen3_5.configuration_qwen3_5 import (
+                Qwen3_5Config as VeomniCfg,
+            )
+            from veomni.models.transformers.qwen3_5.modeling_qwen3_5 import (
+                Qwen3_5ForCausalLM as VeomniLM,
+            )
+            cfg_dict = text_cfg.to_dict()
+            # Flatten nested rope_parameters into top-level fields
+            rope_params = cfg_dict.pop("rope_parameters", {}) or {}
+            if cfg_dict.get("rope_theta") is None:
+                cfg_dict["rope_theta"] = rope_params.get("rope_theta", 10_000_000.0)
+            if cfg_dict.get("mrope_interleaved") is None:
+                cfg_dict["mrope_interleaved"] = rope_params.get("mrope_interleaved", True)
+            if cfg_dict.get("mrope_section") is None:
+                cfg_dict["mrope_section"] = rope_params.get("mrope_section", [11, 11, 10])
+            if cfg_dict.get("partial_rotary_factor") is None:
+                cfg_dict["partial_rotary_factor"] = rope_params.get("partial_rotary_factor", 0.25)
+            cfg_dict.pop("model_type", None)
+            cfg_dict.setdefault("pad_token_id", getattr(text_cfg, "pad_token_id", 0) or 0)
+            load_config = VeomniCfg(**cfg_dict)
+            model_cls = VeomniLM
+            _needs_vl_remap = True
+        else:
+            load_config = text_cfg
+            from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+            model_cls = Qwen3_5ForCausalLM
         load_trust_remote_code = False
     else:
         load_config = hf_config
@@ -134,6 +242,12 @@ def build_qlorafied_model(
         low_cpu_mem_usage=True,
         **kwargs,
     )
+
+    if _needs_vl_remap:
+        # The VL safetensors use model.language_model.* keys but the LM class
+        # expects model.*. Reload weights with key remapping.
+        _remap_vl_weights_into_lm_model(model, model_path)
+
     model.train()
 
     if torch.cuda.is_available():
