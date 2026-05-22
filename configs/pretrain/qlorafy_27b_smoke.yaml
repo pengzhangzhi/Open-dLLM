@@ -1,18 +1,17 @@
-# QLoRA Repr-Align — Qwen3.6-27B, full training (2000 steps)
+# QLoRA Repr-Align — Qwen3.6-27B, smoke test (10 steps)
 #
 # 4-bit NF4 base + LoRA r=32 adapters on RTX 5090 (34 GB).
 # Data: FineWeb 100K sample on 12TB drive (1000 examples).
 # Anchor cache: 1293 precomputed chunks, 4 layers (16,32,48,64).
-# Physical GPU 0 = RTX 5090 (34 GB), GPU 1 = RTX PRO 4000 (25 GB).
 #
 # Launch:
 #   CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-#       tasks/train_torch.py configs/pretrain/qlorafy_27b_train.yaml \
-#       > /tmp/qlorafy_train.log 2>&1 &
-#   echo $! > /tmp/qlorafy_train.pid
+#       tasks/train_torch.py configs/pretrain/qlorafy_27b_smoke.yaml \
+#       > /tmp/qlorafy_smoke.log 2>&1 &
+#   echo $! > /tmp/qlorafy_smoke.pid
 #
 # Monitor:
-#   tail -f /tmp/qlorafy_train.log
+#   tail -f /tmp/qlorafy_smoke.log
 #   nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader -i 0
 
 model:
@@ -86,7 +85,7 @@ train:
   ckpt_manager: dcp
   load_checkpoint_path: ""
   save_steps: 0
-  eval_every: 100
+  eval_every: 0
   save_epochs: 0
   save_hf_weights: true
   auto_resume: false
@@ -94,6 +93,6 @@ train:
 
   use_wandb: true
   wandb_project: open-dllm
-  wandb_name: qlorafy-27b-r32-v3
+  wandb_name: qlorafy-27b-r32-smoke
 
-  max_steps: 2000
+  max_steps: 10

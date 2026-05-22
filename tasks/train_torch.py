@@ -10,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from functools import partial
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -25,11 +25,15 @@ from veomni.data import (
     build_mapping_dataset,
 )
 from veomni.data.data_transform import process_pretrain_example, process_sft_example
+from veomni.data.constants import IGNORE_INDEX
 from veomni.distributed.offloading import build_activation_offloading_context
 from veomni.distributed.parallel_state import get_parallel_state, init_parallel_state
 from veomni.distributed.torch_parallelize import build_parallelize_model
 from veomni.models import build_foundation_model, build_tokenizer, save_model_assets, save_model_weights
 from veomni.optim import build_lr_scheduler, build_optimizer
+from veomni.ops.replay_buffer import ReprAlignReplayBuffer
+from veomni.ops.trajectory_dataset import TrajectoryDataset
+from veomni.data.data_collator import DataCollatorWithTrajectoryMasking
 from veomni.utils import helper
 from veomni.utils.arguments import DataArguments, ModelArguments, TrainingArguments, parse_args, save_args
 from veomni.utils.dist_utils import all_reduce
@@ -258,6 +262,52 @@ def main():
             train_dataset = build_mapping_dataset(args.data.train_path, transform=transform)
             args.train.compute_train_steps(args.data.max_seq_len, args.data.train_size, len(train_dataset))
 
+        eval_dataloader = None
+        if args.data.eval_size > 0 and args.data.datasets_type == "mapping":
+            from veomni.data.data_collator import DataCollatorWithPadding
+            full_dataset = train_dataset
+            n_total = len(full_dataset)
+            n_eval = min(args.data.eval_size, max(1, n_total // 10))
+            n_train = n_total - n_eval
+            if n_train <= 0:
+                logger.warning_rank0(f"eval_size={args.data.eval_size} >= dataset size={n_total}, skipping eval split")
+            else:
+                train_dataset = torch.utils.data.Subset(full_dataset, range(n_train))
+                eval_subset = torch.utils.data.Subset(full_dataset, range(n_train, n_total))
+                eval_collate = DataCollatorWithPadding(pad_token_id=tokenizer.pad_token_id or 0)
+                eval_dataloader = torch.utils.data.DataLoader(
+                    eval_subset,
+                    batch_size=args.train.micro_batch_size,
+                    shuffle=False,
+                    num_workers=min(args.data.num_workers, 2),
+                    pin_memory=True,
+                    collate_fn=eval_collate,
+                )
+                logger.info_rank0(f"Eval split: {n_eval} examples held out from {n_total} total")
+
+        trajectory_dataset = None
+        trajectory_collator = None
+        _traj_path = getattr(args.train, "trajectory_data_path", None)
+        if _traj_path and getattr(args.train, "repr_align_wt", 0) > 0:
+            trajectory_dataset = TrajectoryDataset(_traj_path)
+            logger.info_rank0(
+                f"Trajectory dataset loaded: {len(trajectory_dataset)} samples from {_traj_path}"
+            )
+            trajectory_collator = DataCollatorWithTrajectoryMasking(
+                mask_token_id=tokenizer.mask_token_id,
+                trajectory_dataset=trajectory_dataset,
+                current_mask_ratio=getattr(args.train, "trajectory_min_mask_ratio", 0.0),
+                max_mask_ratio=getattr(args.train, "trajectory_max_mask_ratio", 0.8),
+                current_block_size=32,
+                use_blockwise_loss=getattr(args.train, "trajectory_use_blockwise", False),
+            )
+            # When using trajectory collator, override to avoid random masking collator
+            _enable_masking = True
+            _custom_collate = trajectory_collator
+        else:
+            _enable_masking = args.train.enable_masking
+            _custom_collate = None
+
         train_dataloader = build_dataloader(
             dataset=train_dataset,
             micro_batch_size=args.train.micro_batch_size,
@@ -268,8 +318,9 @@ def main():
             train_steps=args.train.train_steps,
             rmpad=args.train.rmpad,
             rmpad_with_pos_ids=args.train.rmpad_with_pos_ids,
-            enable_masking=args.train.enable_masking,
+            enable_masking=_enable_masking,
             mask_token_id=tokenizer.mask_token_id,
+            collate_fn=_custom_collate,
             bsz_warmup_ratio=args.train.bsz_warmup_ratio,
             bsz_warmup_init_mbtoken=args.train.bsz_warmup_init_mbtoken,
             dyn_bsz_margin=args.train.dyn_bsz_margin,
@@ -281,6 +332,30 @@ def main():
         )
     else:
         raise NotImplementedError(f"Unsupported dataloader type: {args.data.dataloader_type}.")
+
+    eval_dataloader = None
+
+    def run_eval(model, eval_dataloader, tokenizer, args, max_batches=20):
+        model.eval()
+        total_loss = 0.0
+        total_tokens = 0
+        with torch.no_grad():
+            for i, batch in enumerate(eval_dataloader):
+                if i >= max_batches:
+                    break
+                batch = {k: v.cuda(non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                outputs = model(**batch, use_cache=False, repr_align_wt=0.0)
+                loss = outputs.loss
+                if torch.isfinite(loss):
+                    n_tokens = batch.get("attention_mask", batch.get("input_ids")).sum().item()
+                    total_loss += loss.item() * n_tokens
+                    total_tokens += n_tokens
+        model.train()
+        if total_tokens == 0:
+            return None, None
+        avg_loss = total_loss / total_tokens
+        perplexity = math.exp(min(avg_loss, 20))
+        return avg_loss, perplexity
 
     logger.info_rank0("Prepare model")
     # Enter ZeRO-3 Init context BEFORE model creation so DeepSpeed partitions each
@@ -523,6 +598,31 @@ def main():
     consecutive_nan_steps = 0
     nan_abort_threshold = 3
 
+    replay_buffer: Optional[ReprAlignReplayBuffer] = None
+    _replay_capacity = getattr(args.train, "replay_buffer_capacity", 0)
+    if _replay_capacity > 0 and getattr(args.train, "repr_align_wt", 0) > 0:
+        replay_buffer = ReprAlignReplayBuffer(capacity=_replay_capacity)
+        logger.info_rank0(
+            f"ReprAlign replay buffer initialised (capacity={_replay_capacity}, "
+            f"prob={args.train.replay_prob}, warmup={args.train.replay_warmup_steps})"
+        )
+
+    # d3LLM curriculum schedule — parse once before training loop
+    _traj_prog_blocks = getattr(args.train, "trajectory_progressive_block_sizes", None)
+    if _traj_prog_blocks is not None:
+        _traj_prog_blocks = [int(x) for x in _traj_prog_blocks.split(",")]
+    _traj_min_mask = getattr(args.train, "trajectory_min_mask_ratio", 0.0)
+    _traj_max_mask = getattr(args.train, "trajectory_max_mask_ratio", 0.8)
+    _traj_entropy_wt = getattr(args.train, "trajectory_entropy_weight", 0.0)
+
+    if trajectory_collator is not None:
+        logger.info_rank0(
+            f"d3LLM trajectory distillation active: "
+            f"mask_ratio [{_traj_min_mask} → {_traj_max_mask}], "
+            f"progressive_blocks={_traj_prog_blocks or 'full-seq'}, "
+            f"entropy_wt={_traj_entropy_wt}"
+        )
+
     for epoch in range(start_epoch, args.train.num_train_epochs):
         if hasattr(train_dataloader, "set_epoch"):
             train_dataloader.set_epoch(epoch)
@@ -537,6 +637,15 @@ def main():
         data_iterator = iter(train_dataloader)
         for _ in range(start_step, args.train.train_steps):
             global_step += 1
+
+            # Update trajectory collator curriculum schedule
+            if trajectory_collator is not None:
+                progress = min(global_step / max(args.train.train_steps, 1), 1.0)
+                trajectory_collator.current_mask_ratio = _traj_min_mask + progress * (_traj_max_mask - _traj_min_mask)
+                if _traj_prog_blocks:
+                    ep = min(epoch, len(_traj_prog_blocks) - 1)
+                    trajectory_collator.current_block_size = _traj_prog_blocks[ep]
+
             step_loss_components: Dict[str, float] = {}
 
             try:
@@ -574,21 +683,75 @@ def main():
                     for name, value in loss_components.items():
                         step_loss_components[name] = step_loss_components.get(name, 0.0) + value / len(micro_batches)
 
-                    # Log loss breakdown when NaN detected
-                    if not torch.isfinite(loss_tensor) and args.train.local_rank == 0:
+                    # Repr-Align replay buffer: push current batch, sample past batch,
+                    # re-run student alignment on old data to prevent forgetting.
+                    if replay_buffer is not None:
+                        replay_buffer.push(micro_batch)
+                        _replay_prob = getattr(args.train, "replay_prob", 0.3)
+                        _replay_warmup = getattr(args.train, "replay_warmup_steps", 50)
+                        _replay_weight = getattr(args.train, "replay_weight", 0.1)
+                        if (
+                            len(replay_buffer) >= _replay_warmup
+                            and torch.rand(1, device=loss_tensor.device).item() < _replay_prob
+                        ):
+                            _replay_batch = replay_buffer.sample(loss_tensor.device)
+                            if _replay_batch is not None:
+                                _replay_outputs = model(
+                                    **_replay_batch, use_cache=False, repr_align_wt=args.train.repr_align_wt
+                                )
+                                _replay_align = getattr(_replay_outputs, "loss_components", {}).get("repr_align", None)
+                                if _replay_align is not None and torch.isfinite(torch.tensor(_replay_align)):
+                                    loss_tensor = loss_tensor + _replay_weight * _replay_align / len(micro_batches)
+                                    step_loss_components["replay"] = (
+                                        step_loss_components.get("replay", 0.0)
+                                        + _replay_align / len(micro_batches)
+                                    )
+
+                    # d3LLM-style entropy regularization on correctly-predicted masked tokens
+                    if trajectory_collator is not None and _traj_entropy_wt > 0:
+                        _logits = getattr(outputs, "logits", None)
+                        _labels = micro_batch.get("labels", None)
+                        if _logits is not None and _labels is not None:
+                            from torch.nn import functional as _F
+                            _logits_s = _logits[:, :-1].float()
+                            _labels_s = _labels[:, 1:]
+                            _L = min(_logits_s.shape[1], _labels_s.shape[1])
+                            _logits_s = _logits_s[:, :_L]
+                            _labels_s = _labels_s[:, :_L]
+                            _mask = _labels_s != IGNORE_INDEX
+                            if _mask.any():
+                                _temp = getattr(args.train, "trajectory_temperature", 0.5)
+                                _mlogits = _logits_s[_mask]
+                                _mlabels = _labels_s[_mask]
+                                _probs = _F.softmax(_mlogits / _temp, dim=-1)
+                                _H = -(_probs * torch.log(_probs + 1e-12)).sum(dim=-1)
+                                _pred = _mlogits.argmax(dim=-1)
+                                _correct = _pred == _mlabels
+                                if _correct.any():
+                                    _ent_loss = (_H * _correct).sum() / _correct.sum().clamp_min(1)
+                                    loss_tensor = loss_tensor + _traj_entropy_wt * _ent_loss / len(micro_batches)
+                                    step_loss_components["trajectory_entropy"] = (
+                                        step_loss_components.get("trajectory_entropy", 0.0)
+                                        + _ent_loss.item() / len(micro_batches)
+                                    )
+
+                    step_has_nan = not torch.isfinite(loss_tensor)
+                    if step_has_nan and args.train.local_rank == 0:
                         comp_str = ", ".join(f"{k}={v:.4f}" for k, v in loss_components.items())
                         logger.warning_rank0(
                             f"[step {global_step}] NaN loss detected. raw_loss={outputs.loss.mean():.4f} components=[{comp_str}]"
                         )
 
-                with model_bwd_context:
-                    if ds_engine is not None:
-                        ds_engine.backward(loss_tensor)
-                    else:
-                        loss_tensor.backward()
+                if not step_has_nan:
+                    with model_bwd_context:
+                        if ds_engine is not None:
+                            ds_engine.backward(loss_tensor)
+                        else:
+                            loss_tensor.backward()
+                else:
+                    logger.warning_rank0(f"[step {global_step}] Skipping backward for NaN loss")
 
-                # Gradient NaN scan after backward (first occurrence only)
-                if global_step <= 3 and args.train.local_rank == 0:
+                if not step_has_nan and global_step <= 3 and args.train.local_rank == 0:
                     nan_grads = [
                         n for n, p in model.named_parameters()
                         if p.grad is not None and not torch.isfinite(p.grad).all()
@@ -600,8 +763,38 @@ def main():
                     else:
                         logger.info_rank0(f"[step {global_step}] All gradients finite after backward")
 
-                total_loss += loss_tensor.item()
+                if step_has_nan:
+                    total_loss += 0.0
+                else:
+                    total_loss += loss_tensor.item()
                 del micro_batch
+
+            step_had_nan = math.isnan(total_loss) or math.isinf(total_loss)
+            if step_had_nan:
+                if ds_engine is None:
+                    optimizer.zero_grad()
+                consecutive_nan_steps += 1
+                logger.warning_rank0(
+                    f"[step {global_step}] NaN/Inf loss ({consecutive_nan_steps}/{nan_abort_threshold}): "
+                    f"skipping optimizer step"
+                )
+                if consecutive_nan_steps >= nan_abort_threshold:
+                    nan_params = [
+                        n for n, p in list(model.named_parameters())[:50]
+                        if p.data.is_floating_point() and not torch.isfinite(p.data).all()
+                    ]
+                    logger.warning_rank0(
+                        f"ABORT: {nan_abort_threshold} consecutive NaN steps. "
+                        f"NaN params (first 5): {nan_params[:5]}"
+                    )
+                    raise RuntimeError(
+                        f"Training aborted: {nan_abort_threshold} consecutive NaN/Inf loss steps "
+                        f"at global_step={global_step}."
+                    )
+                data_loader_tqdm.update()
+                continue
+
+            consecutive_nan_steps = 0
 
             qlora_lora_gnorm = 0.0
             qlora_lora_pnorm = 0.0
@@ -638,31 +831,6 @@ def main():
                 if not isinstance(reduced_values, (tuple, list)):
                     reduced_values = (reduced_values,)
                 step_loss_components = {name: value for name, value in zip(names, reduced_values)}
-
-            # NaN abort: count consecutive NaN/Inf loss steps and abort after threshold
-            if math.isnan(total_loss) or math.isinf(total_loss):
-                consecutive_nan_steps += 1
-                comp_str = ", ".join(f"{k}={v:.4f}" for k, v in step_loss_components.items())
-                logger.warning_rank0(
-                    f"[step {global_step}] NaN/Inf loss ({consecutive_nan_steps}/{nan_abort_threshold}): "
-                    f"components=[{comp_str}] grad_norm={grad_norm:.4f}"
-                )
-                if consecutive_nan_steps >= nan_abort_threshold:
-                    # Final diagnostic: scan params for NaN before aborting
-                    nan_params = [
-                        n for n, p in list(model.named_parameters())[:50]
-                        if p.data.is_floating_point() and not torch.isfinite(p.data).all()
-                    ]
-                    logger.warning_rank0(
-                        f"ABORT: {nan_abort_threshold} consecutive NaN steps. "
-                        f"NaN params (first 5): {nan_params[:5]}"
-                    )
-                    raise RuntimeError(
-                        f"Training aborted: {nan_abort_threshold} consecutive NaN/Inf loss steps "
-                        f"at global_step={global_step}. Diagnose with log above."
-                    )
-            else:
-                consecutive_nan_steps = 0
 
             torch.cuda.synchronize()
             delta_time = time.time() - start_time
@@ -741,33 +909,44 @@ def main():
                     if args.model.enable_qlorafy and global_step % 100 == 0:
                         try:
                             model.eval()
-                            prompt = "The meaning of life is"
-                            enc = tokenizer(prompt, return_tensors="pt")
-                            pids = enc.input_ids.to(model.device if hasattr(model, 'device') else next(model.parameters()).device)
-                            with torch.no_grad():
-                                if hasattr(model, 'diffusion_generate'):
-                                    from veomni.models.transformers.qwen2.generation_utils import MDMGenerationConfig
-                                    gen_cfg = MDMGenerationConfig(
-                                        mask_token_id=tokenizer.mask_token_id,
-                                        pad_token_id=tokenizer.pad_token_id,
-                                        eos_token_id=tokenizer.eos_token_id,
-                                        max_new_tokens=32, steps=32,
-                                        temperature=0.5, top_k=200, alg="p2", alg_temp=0.5,
-                                        num_return_sequences=1, return_dict_in_generate=True,
-                                    )
-                                    out = model.diffusion_generate(inputs=pids, generation_config=gen_cfg)
-                                    gen_text = tokenizer.decode(out.sequences[0][pids.shape[1]:], skip_special_tokens=True)
-                                else:
-                                    out = model.generate(pids, max_new_tokens=32, do_sample=True, temperature=0.5, top_k=200)
-                                    gen_text = tokenizer.decode(out[0][pids.shape[1]:], skip_special_tokens=True)
-                            train_metrics["generation/sample"] = wandb.Html(
-                                f"<b>Prompt:</b> {prompt}<br><b>Generated:</b> {gen_text}"
-                            )
+                            gen_prompts = ["The meaning of life is", "def fibonacci(n):"]
+                            gen_samples = []
+                            for gp in gen_prompts:
+                                enc = tokenizer(gp, return_tensors="pt")
+                                pids = enc.input_ids.to(model.device if hasattr(model, 'device') else next(model.parameters()).device)
+                                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                                    # AR generation
+                                    ar_out = model.generate(pids, max_new_tokens=64, do_sample=True, temperature=0.7, top_k=200)
+                                    ar_text = tokenizer.decode(ar_out[0][pids.shape[1]:], skip_special_tokens=True)
+
+                                    # Diffusion generation (masked, bidirectional)
+                                    from veomni.models.transformers.qwen2.generation_utils import mdm_generate
+                                    if tokenizer.mask_token_id is not None:
+                                        diff_ids = mdm_generate(model, pids, mask_token_id=tokenizer.mask_token_id, max_new_tokens=64, steps=16, temperature=0.7)
+                                        diff_text = tokenizer.decode(diff_ids[0][pids.shape[1]:], skip_special_tokens=True)
+                                    else:
+                                        diff_text = "(no mask token)"
+                                gen_samples.append(
+                                    f"<b>Prompt:</b> {gp}<br>"
+                                    f"<b>AR:</b> {ar_text}<br>"
+                                    f"<b>Diffusion (16-step):</b> {diff_text}"
+                                )
+                            train_metrics["generation/sample"] = wandb.Html("<hr>".join(gen_samples))
                             model.train()
                         except Exception as e:
                             logger.warning_rank0(f"[step {global_step}] Generation probe failed: {e}")
 
                     wandb.log(train_metrics, step=global_step)
+
+                if eval_dataloader is not None and args.train.eval_every > 0 and global_step % args.train.eval_every == 0 and global_step > 0:
+                    try:
+                        eval_loss, eval_ppl = run_eval(model, eval_dataloader, tokenizer, args)
+                        if eval_loss is not None and args.train.global_rank == 0:
+                            logger.info_rank0(f"[step {global_step}] eval loss={eval_loss:.4f} ppl={eval_ppl:.2f}")
+                            if args.train.use_wandb:
+                                wandb.log({"eval/loss": eval_loss, "eval/perplexity": eval_ppl}, step=global_step)
+                    except Exception as e:
+                        logger.warning_rank0(f"[step {global_step}] Eval failed: {e}")
 
                 if args.train.enable_profiling and global_step <= args.train.profile_end_step:
                     profiler.step()
@@ -788,30 +967,35 @@ def main():
 
             if save_step or eval_step:
                 helper.empty_cache()
+                is_qlora = getattr(args.model, 'enable_qlorafy', False)
+                skip_dcp = is_qlora or not args.train.save_optimizer_state
+
                 if save_step:
                     save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, f"global_step_{global_step}")
                 elif eval_step:
                     save_checkpoint_path = os.path.join(args.train.save_checkpoint_path, "eval")
                 else:
                     raise ValueError("Invalid save or eval step")
-                print(f"save_checkpoint_path: {save_checkpoint_path}")
-                state = {
-                    "model": model,
-                    "optimizer": optimizer,
-                    "extra_state": {
-                        "global_step": global_step,
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "train_dataloader": train_dataloader.state_dict(),
-                        "environ_meter": environ_meter.state_dict(),
-                        "torch_rng_state": torch.get_rng_state(),
-                    },
-                }
-                if args.train.save_optimizer_state:
+
+                if not skip_dcp:
+                    os.makedirs(save_checkpoint_path, exist_ok=True)
+                    state = {
+                        "model": model,
+                        "optimizer": optimizer,
+                        "extra_state": {
+                            "global_step": global_step,
+                            "lr_scheduler": lr_scheduler.state_dict(),
+                            "train_dataloader": train_dataloader.state_dict(),
+                            "environ_meter": environ_meter.state_dict(),
+                            "torch_rng_state": torch.get_rng_state(),
+                        },
+                    }
                     Checkpointer.save(save_checkpoint_path, state)
                     logger.info_rank0(f"Checkpoint saved to {save_checkpoint_path}")
                 else:
                     os.makedirs(save_checkpoint_path, exist_ok=True)
-                    logger.info_rank0("Skipping ZeRO checkpoint (save_optimizer_state=False); HF weights only.")
+                    logger.info_rank0("Skipping DCP checkpoint (QLoRA/Params4bit or save_optimizer_state=False); adapter weights only.")
+
                 if args.train.global_rank == 0 and args.train.save_total_limit > 0:
                     _prune_old_checkpoints(args.train.save_checkpoint_path, args.train.save_total_limit)
 
@@ -821,14 +1005,24 @@ def main():
 
                 if args.train.global_rank == 0 and args.train.save_hf_weights:
                     hf_weights_path = os.path.join(save_checkpoint_path, "hf_ckpt")
-                    logger.info(f"Converting checkpoint from {save_checkpoint_path} to HF format")
-                    model_state_dict = ckpt_to_state_dict(
-                        save_checkpoint_path=save_checkpoint_path,
-                        output_dir=args.train.output_dir,
-                        ckpt_manager=args.train.ckpt_manager,
-                    )
-                    save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
-                    logger.info_rank0(f"Huggingface checkpoint saved at {hf_weights_path} successfully!")
+                    if is_qlora:
+                        from peft import PeftModel
+                        if isinstance(model, PeftModel):
+                            model.save_pretrained(hf_weights_path)
+                            logger.info_rank0(f"PEFT adapter saved at {hf_weights_path}")
+                        else:
+                            adapter_state = {n: p.data for n, p in model.named_parameters() if p.requires_grad}
+                            save_model_weights(hf_weights_path, adapter_state, model_assets=model_assets)
+                            logger.info_rank0(f"Trainable weights saved at {hf_weights_path}")
+                    else:
+                        logger.info(f"Converting checkpoint from {save_checkpoint_path} to HF format")
+                        model_state_dict = ckpt_to_state_dict(
+                            save_checkpoint_path=save_checkpoint_path,
+                            output_dir=args.train.output_dir,
+                            ckpt_manager=args.train.ckpt_manager,
+                        )
+                        save_model_weights(hf_weights_path, model_state_dict, model_assets=model_assets)
+                        logger.info_rank0(f"Huggingface checkpoint saved at {hf_weights_path} successfully!")
 
                     # Run HumanEval evaluation
                     eval_output_path = os.path.join(save_checkpoint_path, "humaneval")

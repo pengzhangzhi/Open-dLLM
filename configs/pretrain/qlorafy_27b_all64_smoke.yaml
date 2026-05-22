@@ -1,19 +1,15 @@
-# QLoRA Repr-Align — Qwen3.6-27B, full training (2000 steps)
+# QLoRA Repr-Align — Qwen3.6-27B, ALL-64-LAYER smoke test.
 #
-# 4-bit NF4 base + LoRA r=32 adapters on RTX 5090 (34 GB).
-# Data: FineWeb 100K sample on 12TB drive (1000 examples).
-# Anchor cache: 1293 precomputed chunks, 4 layers (16,32,48,64).
-# Physical GPU 0 = RTX 5090 (34 GB), GPU 1 = RTX PRO 4000 (25 GB).
+# Tests that the repr-align signal flows through all 64 layers (not just 4).
+# Uses the all64 anchor cache (layers 1..64, max_seq_len=1024, 75 chunks).
+# Kept tiny (32 sequences total) to stay under the 75 cached chunks —
+# CachedTeacher raises KeyError on any cache miss.
 #
 # Launch:
-#   CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-#       tasks/train_torch.py configs/pretrain/qlorafy_27b_train.yaml \
-#       > /tmp/qlorafy_train.log 2>&1 &
-#   echo $! > /tmp/qlorafy_train.pid
-#
-# Monitor:
-#   tail -f /tmp/qlorafy_train.log
-#   nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader -i 0
+#   CUDA_VISIBLE_DEVICES=0 CUDA_DEVICE_ORDER=FASTEST_FIRST \
+#     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#     .venv/bin/python tasks/train_torch.py \
+#     configs/pretrain/qlorafy_27b_all64_smoke.yaml > /tmp/qlorafy_all64_smoke.log 2>&1 &
 
 model:
   model_path: /home/johndpope/ds_offload/models/Qwen3.6-27B
@@ -35,11 +31,11 @@ model:
 
 data:
   train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
-  train_size: 1000
-  eval_size: 50
+  train_size: 64
+  eval_size: 0
   dataloader_type: native
   data_type: plaintext
-  max_seq_len: 2048
+  max_seq_len: 1024
   text_keys: text
   drop_last: true
   datasets_type: mapping
@@ -47,11 +43,11 @@ data:
   prefetch_factor: 2
 
 train:
-  output_dir: /home/johndpope/ds_offload/checkpoints/qlorafy-27b-train
+  output_dir: /home/johndpope/ds_offload/checkpoints/qlorafy-27b-all64-smoke
   ulysses_parallel_size: 1
-  global_batch_size: 16
+  global_batch_size: 4
   micro_batch_size: 1
-  rmpad: true
+  rmpad: false
   rmpad_with_pos_ids: true
   bsz_warmup_ratio: 0.0
   dyn_bsz_margin: 0
@@ -59,9 +55,9 @@ train:
 
   enable_masking: true
   repr_align_wt: 1.0
-  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-27b
-  align_layers: "16,32,48,64"
-  repr_align_sub_sample_ratio: 0.25
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-27b-all64
+  align_layers: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64"
+  repr_align_sub_sample_ratio: 1.0
 
   optimizer: adamw
   lr: 2.0e-4
@@ -86,14 +82,14 @@ train:
   ckpt_manager: dcp
   load_checkpoint_path: ""
   save_steps: 0
-  eval_every: 100
+  eval_every: 0
   save_epochs: 0
-  save_hf_weights: true
+  save_hf_weights: false
   auto_resume: false
   save_time_interval_minutes: 0
 
-  use_wandb: true
+  use_wandb: false
   wandb_project: open-dllm
-  wandb_name: qlorafy-27b-r32-v3
+  wandb_name: qlorafy-27b-all64-smoke
 
-  max_steps: 2000
+  max_steps: 8

@@ -337,3 +337,83 @@ class MDMGenerationMixin:
             return MDMModelOutput(sequences=x, history=histories)
         else:
             return x
+
+
+@torch.no_grad()
+def mdm_generate(
+    model: torch.nn.Module,
+    input_ids: torch.LongTensor,
+    mask_token_id: int,
+    max_new_tokens: int = 32,
+    steps: int = 16,
+    temperature: float = 0.7,
+    top_k: int = 200,
+    alg: str = "entropy",
+    alg_temp: float = 0.6,
+) -> str:
+    """Standalone masked diffusion generation that works with any model (no mixin needed).
+
+    Handles PEFT-wrapped models by calling model(input_ids=x, is_causal=False) directly.
+    """
+    device = input_ids.device
+    pad_token_id = getattr(model.config, "pad_token_id", None)
+    x = F.pad(input_ids, (0, max_new_tokens), value=mask_token_id)
+    gen_attention_mask = (x != pad_token_id).long() if pad_token_id is not None else None
+    timesteps = torch.linspace(1, 1e-3, steps + 1, device=device)
+
+    for i in range(steps):
+        mask_index = (x == mask_token_id)
+        if not mask_index.any():
+            break
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = model(input_ids=x, attention_mask=gen_attention_mask, is_causal=False)
+        logits = outputs.logits
+        logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
+        mask_logits = logits[mask_index]
+        t, s = timesteps[i], timesteps[i + 1]
+
+        probs = torch.softmax(mask_logits.float(), dim=-1)
+        if temperature > 0:
+            mask_logits = mask_logits / temperature
+            probs = torch.softmax(mask_logits.float(), dim=-1)
+
+        if top_k and top_k > 0:
+            top_k_val = min(top_k, probs.size(-1))
+            indices_to_remove = probs < torch.topk(probs, top_k_val)[0][..., -1, None]
+            probs = probs.masked_fill(indices_to_remove, 0.0)
+            probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+
+        if alg == "entropy":
+            log_probs = torch.log(probs.clamp(min=1e-10))
+            confidence = (probs * log_probs).sum(dim=-1)
+        else:
+            confidence = torch.gather(probs, -1, probs.argmax(dim=-1, keepdim=True)).squeeze(-1)
+
+        x0 = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(confidence.shape) if temperature > 0 else probs.argmax(dim=-1)
+
+        num_masked = mask_index.sum(dim=-1, keepdim=True)
+        gamma = 1 - s / t
+        num_to_unmask = (num_masked * gamma).long()
+
+        full_confidence = torch.full_like(x, -float("inf"), device=device, dtype=confidence.dtype)
+        full_confidence[mask_index] = confidence
+
+        if alg_temp and alg_temp > 0:
+            scaled_logits = full_confidence / alg_temp
+            uniform = torch.rand_like(scaled_logits).clamp_(min=1e-20, max=1 - 1e-20)
+            gumbel_noise = -torch.log(-torch.log(uniform))
+            scores = scaled_logits + gumbel_noise
+            _, unmask_indices = torch.topk(scores, num_to_unmask.max(), dim=1)
+        else:
+            _, unmask_indices = torch.topk(full_confidence, num_to_unmask.max(), dim=1)
+
+        rows = torch.arange(x.size(0), device=device).unsqueeze(1)
+        unmask_selection_mask = torch.zeros_like(x, dtype=torch.bool)
+        unmask_selection_mask[rows, unmask_indices] = True
+        unmask_selection_mask = unmask_selection_mask & (torch.cumsum(unmask_selection_mask.long(), dim=-1) <= num_to_unmask)
+
+        x_unmasked_proposals = torch.full_like(x, fill_value=mask_token_id)
+        x_unmasked_proposals[mask_index] = x0
+        x[unmask_selection_mask] = x_unmasked_proposals[unmask_selection_mask]
+
+    return x

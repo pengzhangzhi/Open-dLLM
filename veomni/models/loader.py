@@ -25,6 +25,7 @@ from transformers import (
     PreTrainedModel,
 )
 
+from ..distributed.parallel_state import get_parallel_state
 from ..utils import logging
 from ..utils.import_utils import is_torch_npu_available, is_vescale_available
 from .module_utils import init_empty_weights, load_model_weights
@@ -116,7 +117,15 @@ class CustomizedModelingLoader(BaseModelLoader):
             with torch.device(init_device):
                 model = self.model_cls._from_config(**init_kwargs)
         else:
-            if is_vescale_available() and init_device == "meta":
+            _in_zero_init = (
+                get_parallel_state().dp_mode == "deepspeed"
+                and init_device in ("meta", "cpu")
+            )
+            if _in_zero_init:
+                # DeepSpeed zero.Init() handles parameter partitioning
+                # incrementally — no init_empty_weights needed.
+                model = self.model_cls._from_config(**init_kwargs)
+            elif is_vescale_available() and init_device == "meta":
                 from vescale.initialize.meta_init import meta_device_init
 
                 with meta_device_init():

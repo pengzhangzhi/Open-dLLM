@@ -38,6 +38,7 @@ from transformers.utils import (
 )
 
 from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
+from veomni.models.transformers.qwen2.multi_block_generation import MultiBlockDecoderMixin
 
 from ....data.constants import IGNORE_INDEX
 from ....distributed.parallel_state import get_parallel_state
@@ -873,7 +874,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
 class KwargsForCausalLM(FlashAttentionKwargs, ): ...
 
 
-class Qwen2ForCausalLM(Qwen2PreTrainedModel,  MDMGenerationMixin):
+class Qwen2ForCausalLM(Qwen2PreTrainedModel, MDMGenerationMixin, MultiBlockDecoderMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}

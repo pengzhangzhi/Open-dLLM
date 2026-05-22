@@ -42,6 +42,7 @@ def process_pretrain_example(
     max_seq_len: int,
     text_keys: Union[str, List[str]] = "content_split",
     source_name: Optional[str] = None,
+    index: Optional[int] = None,
 ) -> List[Dict[str, "torch.Tensor"]]:
     examples = []
     if isinstance(text_keys, str):
@@ -58,13 +59,14 @@ def process_pretrain_example(
 
     tokens = tokenizer.encode(text_example, add_special_tokens=False) + [tokenizer.eos_token_id]
     for input_ids in split_into_chunks(tokens, max_seq_len):
-        examples.append(
-            {
-                "input_ids": torch.tensor(input_ids),
-                "attention_mask": torch.tensor([1] * len(input_ids)),
-                "labels": torch.tensor(input_ids),
-            }
-        )
+        example_dict = {
+            "input_ids": torch.tensor(input_ids),
+            "attention_mask": torch.tensor([1] * len(input_ids)),
+            "labels": torch.tensor(input_ids),
+        }
+        if index is not None:
+            example_dict["sample_idx"] = index
+        examples.append(example_dict)
 
     return examples
 

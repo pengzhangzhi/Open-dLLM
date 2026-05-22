@@ -41,7 +41,10 @@ from transformers.utils import (
 )
 
 from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
+from veomni.models.transformers.qwen2.multi_block_generation import MultiBlockDecoderMixin
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 from veomni.models.transformers.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+
 from veomni.models.transformers.qwen3_5.delta_rule import (
     chunk_gated_delta_rule_pytorch,
 )
@@ -66,6 +69,17 @@ logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "Qwen/Qwen3.6-27B"
 _CONFIG_FOR_DOC = "Qwen3_5Config"
+
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """Repeat KV heads for grouped-query attention.
+    (batch, num_key_value_heads, seqlen, head_dim) → (batch, num_key_value_heads*n_rep, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
 def repr_align_loss_fn(z1, z2):
@@ -107,7 +121,7 @@ class Qwen3_5RMSNormGated(nn.Module):
         self.gate = nn.Linear(hidden_size, hidden_size, bias=False)
 
     def forward(self, hidden_states):
-        return self.norm(hidden_states) * torch.silu(self.gate(hidden_states))
+        return self.norm(hidden_states) * F.silu(self.gate(hidden_states))
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +290,7 @@ class Qwen3_5Attention(nn.Module):
         from torch.nn.functional import scaled_dot_product_attention as sdpa
         key = repeat_kv(key, self.num_key_value_groups)
         value = repeat_kv(value, self.num_key_value_groups)
-        return sdpa(query, key, value, attn_mask=attention_mask, dropout=0.0, is_causal=self.is_causal).transpose(1, 2).contiguous()
+        return sdpa(query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=self.is_causal).transpose(1, 2).contiguous()
 
     def _eager_forward(self, query, key, value, attention_mask):
         B, H, S, D = query.shape
@@ -321,15 +335,15 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.scaling = self.linear_key_head_dim ** -0.5
         self.use_fla = is_fla_available()
 
-        self.q_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.head_dim, bias=False)
+        self.q_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.linear_key_head_dim, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.linear_key_head_dim, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, self.linear_num_value_heads * self.linear_value_head_dim, bias=False)
         self.o_proj = nn.Linear(self.linear_num_value_heads * self.linear_value_head_dim, config.hidden_size, bias=False)
 
         # Input gate for delta rule
-        self.gate_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.head_dim, bias=False)
+        self.gate_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.linear_key_head_dim, bias=False)
         # Beta (forget gate) projection — learns the decay rate
-        self.beta_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.head_dim, bias=False)
+        self.beta_proj = nn.Linear(config.hidden_size, self.linear_num_key_heads * self.linear_key_head_dim, bias=False)
 
         # Conv projections for key and value
         if self.linear_conv_kernel_dim > 1:
@@ -369,24 +383,24 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         g = self.gate_proj(hidden_states)                    # (B, S, n_key_heads * head_dim)
         beta = self.beta_proj(hidden_states)                 # (B, S, n_key_heads * head_dim)
 
-        # Partial RoPE on q and k
-        q, k = apply_rotary_pos_emb_partial(q, k, cos, sin, self.rotary_dim)
-
-        # Reshape
-        q = q.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)     # (B, H, S, D)
+        # Reshape q/k to 4-D before rotary (apply_rotary_pos_emb_partial expects (B,H,S,D))
+        q = q.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)     # (B, H, S, D)
         k = k.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)  # (B, H, S, Dk)
         v = v.view(B, S, self.linear_num_value_heads, self.linear_value_head_dim).transpose(1, 2)  # (B, H, S, Dv)
-        g = g.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)     # (B, H, S, D)
-        beta = beta.view(B, S, self.linear_num_key_heads, self.head_dim).transpose(1, 2)  # (B, H, S, D)
+        g = g.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)     # (B, H, S, D)
+        beta = beta.view(B, S, self.linear_num_key_heads, self.linear_key_head_dim).transpose(1, 2)  # (B, H, S, D)
+
+        # Partial RoPE on q and k (both 4-D now)
+        q, k = apply_rotary_pos_emb_partial(q, k, cos, sin, self.rotary_dim)
 
         # Apply conv to k and v
+        # k/v are (B, H, S, D). k_conv expects (B, H*D, S) with groups=H.
+        # Even kernel_size with symmetric padding gives output length S+1; trim to S.
         if self.linear_conv_kernel_dim > 1:
-            k_reshaped = k.transpose(1, 2).reshape(B * self.linear_num_key_heads, S, self.linear_key_head_dim)
-            v_reshaped = v.transpose(1, 2).reshape(B * self.linear_num_value_heads, S, self.linear_value_head_dim)
-            k_reshaped = self.k_conv(k_reshaped.transpose(1, 2)).transpose(1, 2).reshape(B, self.linear_num_key_heads, S, self.linear_key_head_dim)
-            v_reshaped = self.v_conv(v_reshaped.transpose(1, 2)).transpose(1, 2).reshape(B, self.linear_num_value_heads, S, self.linear_value_head_dim)
-            k = k_reshaped
-            v = v_reshaped
+            k_in = k.permute(0, 1, 3, 2).reshape(B, self.linear_num_key_heads * self.linear_key_head_dim, S)
+            k = self.k_conv(k_in)[..., :S].reshape(B, self.linear_num_key_heads, self.linear_key_head_dim, S).permute(0, 1, 3, 2)
+            v_in = v.permute(0, 1, 3, 2).reshape(B, self.linear_num_value_heads * self.linear_value_head_dim, S)
+            v = self.v_conv(v_in)[..., :S].reshape(B, self.linear_num_value_heads, self.linear_value_head_dim, S).permute(0, 1, 3, 2)
 
         # Handle recurrent cache for decode
         if past_key_value is not None:
@@ -540,7 +554,7 @@ class Qwen3_5DecoderLayer(GradientCheckpointingLayer):
 # ---------------------------------------------------------------------------
 
 class Qwen3_5PreTrainedModel(PreTrainedModel):
-    config_class = Qwen3_5Config
+    config_class = Qwen3_5TextConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
     _no_split_modules = ["Qwen3_5DecoderLayer"]
@@ -738,7 +752,7 @@ class Qwen3_5Model(Qwen3_5PreTrainedModel):
 class KwargsForCausalLM: ...
 
 
-class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
+class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin, MultiBlockDecoderMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
@@ -1019,6 +1033,16 @@ class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, MDMGenerationMixin):
             result.loss_components = {k: v.detach().float().item() for k, v in loss_components.items()}
         else:
             result.loss_components = {}
+
+        # Expose repr_align hidden states for DifferentialReplayLoss in the training loop.
+        # student_hidden_states retains grad (flows through LoRA adapters).
+        # teacher_hidden_states is detached (computed under no_grad).
+        if _repr_align_active and teacher_outputs is not None:
+            result.repr_align_student_states = student_hidden_states  # tuple([B, L, D], ...)
+            result.repr_align_teacher_states = teacher_hidden_states  # tuple([B, L, D], ...)
+        else:
+            result.repr_align_student_states = None
+            result.repr_align_teacher_states = None
 
         return result
 

@@ -36,6 +36,7 @@ from transformers.utils import (
 )
 
 from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
+from veomni.models.transformers.qwen2.multi_block_generation import MultiBlockDecoderMixin
 from veomni.models.transformers.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5Attention,
     Qwen3_5DynamicCache,
@@ -498,7 +499,7 @@ class Qwen3_5MTPHead(nn.Module):
         return logits
 
 
-class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin):
+class Qwen3_5MoeForCausalLM(Qwen3_5MoePreTrainedModel, MDMGenerationMixin, MultiBlockDecoderMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}

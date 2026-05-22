@@ -29,6 +29,7 @@ train:
   output_dir: /home/johndpope/ds_offload/checkpoints/qwen3.6-27b-local-repr-align
   data_parallel_mode: deepspeed
   ds_zero_stage: 3
+  init_device: meta
   ds_offload_optimizer: cpu
   ds_offload_param: cpu
   ds_overlap_comm: true
@@ -56,8 +57,8 @@ train:
   freeze_layers: ""
   quantize_frozen: false
 
-  # Real training — remove or set max_steps for limited run
-  max_steps: 10000
+  # Smoke test — increase for real training
+  max_steps: 10
 
   optimizer: adamw
   lr: 1.0e-4
@@ -88,3 +89,5 @@ train:
   use_wandb: true
   wandb_project: open-dllm-27b-local
   wandb_name: qwen3.6-27b-local-repr-align-ds
+
+

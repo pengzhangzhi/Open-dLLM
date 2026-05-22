@@ -273,7 +273,7 @@ configs/pretrain/qwen2_5_coder_500M.yaml --data.train_path=data/data \
 
 ### QLoRA Repr-Align (27B on a single 32 GB GPU)
 
-For 27B+ models that don't fit in GPU memory at full precision, use **QLoRA Repr-Align**: NF4 quantized base (frozen) + LoRA adapters (trainable). Fits in ~22 GB VRAM.
+For 27B+ models that don't fit in GPU memory at full precision, use **QLoRA Repr-Align**: NF4 quantized base (frozen) + LoRA adapters (trainable). Fits in ~25 GB VRAM with r=32.
 
 #### How NF4 quantization works
 
@@ -286,9 +286,24 @@ No separate quantization step is needed. `bitsandbytes` quantizes weights on-the
 huggingface-cli download Qwen/Qwen3.6-27B --local-dir /path/to/Qwen3.6-27B
 ```
 
-2. **Precompute teacher anchor cache** (one-time, ~25 GB):
+2. **Prepare training data** (plaintext JSONL with a `text` field):
 ```bash
-python scripts/precompute_anchor.py \
+python -c "
+from datasets import load_dataset
+import json
+ds = load_dataset('HuggingFaceFW/fineweb', name='sample-10BT', split='train', streaming=True)
+with open('data.jsonl', 'w') as f:
+    for i, ex in enumerate(ds):
+        if i >= 100000: break
+        f.write(json.dumps({'text': ex['text']}) + '\n')
+"
+```
+
+3. **Precompute teacher anchor cache** (one-time). This runs the frozen teacher model on your training data and caches hidden states for selected layers. The cached anchors are reused every training step — no live teacher needed during training.
+
+For a **smoke test** (1000 examples, 4 layers, ~2 min):
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/precompute_anchor.py \
     --model_path /path/to/Qwen3.6-27B \
     --data_path /path/to/data.jsonl \
     --output_dir /path/to/anchors/qwen3.6-27b \
@@ -297,50 +312,80 @@ python scripts/precompute_anchor.py \
     --max_examples 1000
 ```
 
-3. **Prepare smoke data** (any plaintext JSONL with a `text` field):
+For **production** (100K examples, all 64 layers — recommended for best alignment quality). This requires a GPU with ≥32 GB VRAM or a cloud instance:
 ```bash
-head -20 your_data.jsonl > /tmp/smoke_20.jsonl
+CUDA_VISIBLE_DEVICES=0 python scripts/precompute_anchor.py \
+    --model_path /path/to/Qwen3.6-27B \
+    --data_path /path/to/data.jsonl \
+    --output_dir /path/to/anchors/qwen3.6-27b-all64 \
+    --layers 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64 \
+    --max_seq_len 1024
 ```
 
-4. **Edit config** to point to your local paths in `configs/pretrain/qlorafy_27b.yaml`:
+> **Note**: The `--layers` argument uses 1-indexed layer numbers. `--max_examples` limits the number of training examples cached. Omit it to cache the full dataset. The cache is stored as one `.safetensors` file per sequence chunk, keyed by SHA-256 of `input_ids`. Re-running with the same arguments skips already-cached chunks.
+
+4. **Run training** (single 32 GB GPU):
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    nohup .venv/bin/torchrun --nproc_per_node=1 \
+    tasks/train_torch.py configs/pretrain/qlorafy_27b_train.yaml \
+    > /tmp/qlorafy_train.log 2>&1 &
+echo $! > /tmp/qlorafy_train.pid
+
+# Monitor:
+tail -f /tmp/qlorafy_train.log
+```
+
+Before launching, edit `configs/pretrain/qlorafy_27b_train.yaml` to point to your local paths:
 ```yaml
 model:
-  model_path: /path/to/Qwen3.6-27B    # step 1
+  model_path: /path/to/Qwen3.6-27B           # step 1
+data:
+  train_path: /path/to/data.jsonl              # step 2
+  eval_size: 50                               # hold out 50 examples for perplexity eval
 train:
-  anchor_cache_dir: /path/to/anchors/qwen3.6-27b  # step 2
-  data:
-    train_path: /tmp/smoke_20.jsonl   # step 3
-```
-
-5. **Run** (single GPU, ~22 GB VRAM):
-```bash
-CUDA_VISIBLE_DEVICES=0 .venv/bin/torchrun --nproc_per_node=1 \
-    tasks/train_torch.py configs/pretrain/qlorafy_27b.yaml
+  anchor_cache_dir: /path/to/anchors/qwen3.6-27b  # step 3
+  eval_every: 100                              # run eval every 100 steps
+  wandb_project: your-wandb-project
+  wandb_name: qlorafy-27b-run1
 ```
 
 #### What the config does
 
 | Setting | Value | Why |
 |---------|-------|-----|
-| `enable_qlorafy: true` | NF4 base + LoRA r=16 | 27B → ~7 GB in VRAM |
-| `language_model_only: true` | Auto-set by qlorafy.py | Skips 4.7 GB vision encoder |
+| `enable_qlorafy: true` | NF4 base + LoRA r=32 | 27B → ~7 GB in VRAM, r=32 fits 32 GB GPU |
+| `language_model_only` | Auto-set by qlorafy.py | Loads text-only `Qwen3_5ForCausalLM`, skips 4.7 GB vision encoder |
 | `repr_align_wt: 1.0` | Alignment loss weight | Bidirectional adaptation |
-| `align_layers: "16,32,48,64"` | 4 of 64 layers | Evenly spaced |
+| `align_layers: "16,32,48,64"` | 4 of 64 layers | Matches anchor cache; use all 64 for production |
 | `repr_align_sub_sample_ratio: 0.25` | 25% of tokens | 4× gradient memory reduction |
 | `save_epochs: 0` | Skip DCP checkpoint | DCP can't serialize `Params4bit` |
+| `eval_size: 50` | Hold out 50 examples | Perplexity eval every `eval_every` steps |
+| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | Required for r=32 | Reduces memory fragmentation on 32 GB GPU |
 
-#### Smoke test results (RTX 5090, 32 GB)
+#### LoRA rank vs VRAM
+
+| Rank | LoRA Params | Trainable % | Fits RTX 5090 (32 GB)? |
+|------|-------------|-------------|------------------------|
+| 16 | 73M | 0.27% | Yes (24 GB) |
+| 32 | 147M | 0.54% | Yes, needs `expandable_segments:True` (28 GB) |
+| 64 | 294M | 1.09% | No — OOMs during first forward pass |
+| 128 | 587M | 2.17% | No |
+
+#### Training results (RTX 5090, 32 GB, r=32)
 
 | Metric | Value |
 |--------|-------|
-| NF4 base | 23.1 GiB |
-| LoRA adapters | 0.02 GiB |
-| Trainable params | 79.7M / 27B (0.30%) |
-| Peak VRAM | 27.2 GiB |
-| Speed | ~1.2 s/step |
-| Loss (10 steps) | 3.5–8.3, all gradients finite |
+| Peak VRAM | ~28 GB allocated |
+| Speed | ~19 s/step (micro_batch=1, 16 grad_accum) |
+| Throughput | ~440 tok/s, MFU ~19% |
+| Loss (20 steps) | 5.2 → 5.1 (stabilizing) |
+| Grad norm | 59 → 2.4 (rapidly converging) |
+| Eval | Perplexity logged to wandb every 100 steps |
 
-> **Checkpoint limitation**: DCP (`torch.distributed.checkpoint`) cannot serialize `Params4bit` objects from bitsandbytes. Set `save_epochs: 0` and `save_steps: 999999` during training. To save LoRA weights, use `save_hf_weights: true` (exports PEFT adapter weights only, not the NF4 base).
+> **Checkpoint limitation**: DCP (`torch.distributed.checkpoint`) cannot serialize `Params4bit` objects from bitsandbytes. Set `save_epochs: 0` during training. To save LoRA weights, use `save_hf_weights: true` (exports PEFT adapter weights only, not the NF4 base).
+>
+> **Wandb metrics logged**: `training/loss`, `training/grad_norm`, `training/lr`, `qlora/grad_norm`, `qlora/param_norm`, `qlora/grad_to_param_ratio`, `eval/loss`, `eval/perplexity`, `flops_achieved(T)`, `flops_promised(T)`, `mfu`, `tokens_per_second`, `system/vram_allocated_gb`, `system/vram_reserved_gb`. Generation probe every 100 steps via `generation/sample`.
 
 ### Uploading Checkpoints to Hugging Face
 
@@ -492,9 +537,111 @@ See the full LDLM section below for details.
 
 > **Bottom line**: If you have an off-the-shelf AR model and want diffusion capabilities with minimal compute, use **Repr-Align**. It's already built into the Qwen3.6 model implementations (`modeling_qwen3_5_moe.py`, `modeling_qwen3.py`, `modeling_qwen2.py`).
 
+### d3LLM-Style Trajectory Distillation (Masking Curriculum)
+
+Open-dLLM implements [**d3LLM**](https://arxiv.org/abs/2601.07568) (ICML 2026) trajectory-guided masking for Repr-Align training. Instead of random masking, the unmasking order from a teacher diffusion generation run determines the training-time mask pattern. Tokens that the teacher unmasked early are predicted first; tokens unmasked late are predicted later.
+
+**The problem with random masking**: Standard Repr-Align uses uniformly random masks during training. Random masks give the student model no signal about *which* tokens can be safely predicted with limited context — every position is equally likely to be masked, regardless of its predictability.
+
+**d3LLM's fix**: Pre-compute a *decoding trajectory* (the order in which tokens are unmasked during inference) by running `diffusion_generate()` on each training sample. During training, mask according to the trajectory step closest to the target mask ratio. This aligns training-time masking with inference-time decoding behavior.
+
+**Pipeline**:
+
+1. **Extract trajectories** (one-time pre-processing):
+```bash
+python -m veomni.ops.trajectory_extractor \
+    --model_path Qwen/Qwen3-1.7B \
+    --data_path /path/to/train.jsonl \
+    --output_dir /path/to/trajectories \
+    --max_seq_len 2048 \
+    --steps 256
+```
+
+2. **Train with trajectory-guided masking**:
+```yaml
+train:
+  enable_masking: true
+  repr_align_wt: 1.0
+  trajectory_data_path: /path/to/trajectories/trajectories.jsonl
+  trajectory_min_mask_ratio: 0.0
+  trajectory_max_mask_ratio: 0.8
+  trajectory_progressive_block_sizes: "16,24,32"
+  trajectory_use_blockwise: true
+  trajectory_entropy_weight: 1.0
+```
+
+**Key differences from the replay buffer**:
+- Replay buffer stores **past batches** to prevent forgetting (uniform sampling)
+- Trajectory distillation uses the **teacher's inference-time unmasking order** to guide masking (curriculum learning)
+- They are **complementary** — both can be enabled simultaneously (the replay buffer replays alignment loss, while trajectory distillation changes the masking pattern)
+
 ---
 
-## 🧬 LDLM: Latent Diffusion Language Model
+## ⚡ Multi-Block Decoder (d3LLM Inference)
+
+The **multi-block decoder** implements d3LLM's pipelined parallel decoding ([ICML 2026](https://arxiv.org/abs/2601.07568)) — the inference-side counterpart to trajectory-guided masking. Instead of denoising the full sequence in one block, it divides the generation region into blocks and processes them in a pipeline, achieving up to **~5× speedup over AR decoding**.
+
+### How it works
+
+1. **Block-causal attention**: Each block attends to the prompt + all previous blocks + itself (bidirectional within block). Implemented in `create_block_causal_mask()`.
+2. **Block state machine**: Tracks each block's progress through 4 states: Inactive → Activated → Fully-Activated → Completed.
+   - `block_add_threshold` (0.5): new block added when last block is ≥50% decoded
+   - `decoded_token_threshold` (0.5): next block activated when previous is ≥50% decoded
+3. **Entropy-thresholded decoding**: Tokens with entropy < `entropy_threshold` get decoded each step. A forced-progress mechanism ensures at least 1 token per fully-activated block per step.
+4. **EOS early stopping**: Detects EOS and immediately marks all subsequent tokens as EOS (not mask), updating block states accordingly.
+
+### Code
+
+```
+veomni/models/transformers/qwen2/multi_block_generation.py
+```
+
+Key components:
+
+| Component | Description |
+|-----------|-------------|
+| `MultiBlockDecoderConfig` | Config with `block_size`, `entropy_threshold`, `block_add_threshold`, `decoded_token_threshold`, `early_stop` |
+| `MultiBlockDecoderMixin` | Mixin class with `generate_multi_block()` entry point |
+| `create_block_causal_mask()` | Full-sequence block-causal attention mask |
+| `_sample_multi_block()` | Pipelined parallel decoding loop |
+
+Mixed into:
+- `Qwen2ForCausalLM`
+- `Qwen3ForCausalLM`
+- `Qwen3_5ForCausalLM`
+- `Qwen3_5MoeForCausalLM`
+
+### Usage
+
+```python
+from veomni.models.transformers.qwen2.multi_block_generation import MultiBlockDecoderConfig
+
+gen_config = MultiBlockDecoderConfig(
+    mask_token_id=MASK_ID,
+    steps=64,
+    block_size=32,
+    entropy_threshold=0.9,
+    max_length=prompt_len + max_new_tokens,
+    temperature=0.0,
+    early_stop=True,
+    eos_token_id=tokenizer.eos_token_id,
+)
+result = model.generate_multi_block(input_ids, gen_config)
+```
+
+### Current status
+
+| Feature | Status |
+|---------|--------|
+| Pipelined parallel decoding | ✅ Working |
+| Block-causal attention mask | ✅ Working |
+| Entropy-thresholded token selection | ✅ Working |
+| Forced progress (≥1 token/block/step) | ✅ Working |
+| EOS early stopping | ✅ Working |
+| KV-cache optimization | 🔴 Blocked (HF cache incompatible with block-causal masks) |
+| Trajectory-aware decoding | 📝 Future |
+
+---
 
 Open-dLLM supports **LDLM** (Latent Diffusion Language Model, [arXiv:2605.07933](https://arxiv.org/abs/2605.07933)) — a Perceiver-based latent diffusion approach that jointly trains a latent encoder, diffusion model, and decoder on top of a frozen pre-trained LM. The key insight: reshaping the frozen encoder's hidden states into a diffusion-friendly latent space via a trainable Perceiver, yielding latents that are easy to both denoise and decode into tokens.
 
