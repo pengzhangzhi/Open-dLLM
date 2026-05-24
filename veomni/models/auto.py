@@ -93,25 +93,32 @@ def build_foundation_model(
             trust_remote_code=True,
         )
 
+        # For PEFT models, Repr-Align attrs must be set on the base model
+        # (peft_model.base_model.model) so they're visible inside forward().
+        _peft_base = model
+        _lora_model = getattr(model, "base_model", None)
+        if _lora_model is not None:
+            _peft_base = getattr(_lora_model, "model", model)
+
         # Parse align_layers for Repr-Align (same as normal path does)
         align_layers_str = align_layers
         if align_layers_str:
             parsed = sorted({int(x) for x in align_layers_str.split(",") if x.strip()})
-            if hasattr(model, "align_layers"):
-                model.align_layers = parsed
-            else:
-                setattr(model, "align_layers", parsed)
+            _peft_base.align_layers = parsed
+
+        if repr_align_sub_sample_ratio < 1.0:
+            _peft_base.repr_align_sub_sample_ratio = float(repr_align_sub_sample_ratio)
 
         if anchor_cache_dir:
             from .cached_teacher import CachedTeacher
 
-            cfg = model.config
-            model.teacher_model = CachedTeacher(
+            cfg = _peft_base.config
+            _peft_base.teacher_model = CachedTeacher(
                 cache_dir=anchor_cache_dir,
                 num_hidden_layers=cfg.num_hidden_layers,
                 hidden_size=cfg.hidden_size,
             )
-            logger.info_rank0(f"[QLaRA] CachedTeacher from {anchor_cache_dir}")
+            logger.info_rank0(f"[QLoRA] CachedTeacher from {anchor_cache_dir}")
 
         if use_tropical:
             model.config._attn_implementation = "tropical"

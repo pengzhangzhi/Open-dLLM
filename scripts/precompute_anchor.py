@@ -1,35 +1,31 @@
 """Precompute frozen-teacher hidden states for Repr-Align training.
 
-Loads a Qwen3 (or compatible) HF checkpoint, iterates a plaintext JSONL dataset
-using the SAME tokenization the trainer's `process_pretrain_example` uses, then
-runs a forward pass per chunk and dumps the selected layers' hiddens to
-safetensors files sharded by SHA-256 of the chunk's input_ids.
+Loads a model, iterates a JSONL dataset, runs ONE forward pass per chunk
+using forward hooks to capture ALL specified layer outputs simultaneously,
+and dumps to safetensors files keyed by SHA-256 hash of input_ids.
 
-The trainer's pipeline (see veomni/data/data_transform.py:process_pretrain_example):
-    tokens = tokenizer.encode(text, add_special_tokens=False) + [eos_token_id]
-    chunks = split_into_chunks(tokens, max_seq_len)
-Each chunk becomes one training example (no padding). Multiple chunks are then
-packed into one rmpad row by the collator. `CachedTeacher` splits the packed
-row using position_ids before looking up per-chunk hidden states, so the
-precompute must produce exactly one cache file per chunk, keyed by the hash of
-the chunk's unpadded input_ids tensor.
+Each hook fires during the forward pass and immediately moves the layer's
+output to CPU, so peak GPU memory holds at most one layer's hidden state
+regardless of how many layers are captured.
 
-Example:
+Usage:
     python scripts/precompute_anchor.py \\
-        --model_path Qwen/Qwen3-1.7B \\
-        --data_path /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl \\
-        --output_dir /home/johndpope/ds_offload/anchors/qwen3-1.7b \\
-        --layers 7,14,21,28 \\
-        --max_seq_len 2048 \\
+        --model_path /path/to/model \\
+        --data_path /path/to/data.jsonl \\
+        --output_dir /path/to/anchors \\
+        --layers all \\
+        --max_seq_len 4096 \\
         --max_examples 1000
-"""
 
+Output: {output_dir}/{hash[:2]}/{hash}.safetensors  (one per chunk)
+         {output_dir}/manifest.json                   (for CachedTeacher)
+"""
 import argparse
 import hashlib
 import json
+import random
 import time
 from pathlib import Path
-from typing import Iterator
 
 import torch
 from safetensors.torch import save_file
@@ -37,153 +33,209 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def hash_chunk(input_ids: torch.Tensor) -> str:
-    return hashlib.sha256(input_ids.cpu().numpy().tobytes()).hexdigest()[:16]
+    return hashlib.sha256(input_ids.numpy().tobytes()).hexdigest()[:16]
 
 
 def cache_path(output_dir: Path, h: str) -> Path:
     return output_dir / h[:2] / f"{h}.safetensors"
 
 
-def iter_jsonl_texts(path: str, text_key: str, max_examples: int | None) -> Iterator[str]:
-    with open(path, "r") as f:
-        for i, line in enumerate(f):
-            if max_examples is not None and i >= max_examples:
-                break
-            try:
-                yield json.loads(line)[text_key]
-            except (json.JSONDecodeError, KeyError):
+def parse_layer_spec(s: str, num_hidden: int) -> list[int]:
+    if s == "all":
+        return list(range(num_hidden + 1))
+    return sorted(set(int(x) for x in s.split(",") if x.strip()))
+
+
+class HiddenCapture:
+    """Captures specific layer hidden states via forward hooks.
+
+    Each hook fires during the forward pass and immediately moves the
+    layer's output to CPU, so only one layer's hidden state is ever
+    resident on GPU at a time.
+    """
+    def __init__(self):
+        self.hiddens: dict[int, torch.Tensor] = {}
+        self._handles = []
+
+    def _make_hook(self, layer_idx: int):
+        def hook(module, input, output):
+            h = output[0] if isinstance(output, (tuple, list)) else output
+            self.hiddens[layer_idx] = h.detach().cpu()
+        return hook
+
+    def register(self, model, layer_indices: list[int]):
+        self.hiddens.clear()
+        self._handles.clear()
+        for idx in layer_indices:
+            if idx == 0:
                 continue
+            handle = model.model.layers[idx - 1].register_forward_hook(
+                self._make_hook(idx)
+            )
+            self._handles.append(handle)
+
+    def remove(self):
+        for h in self._handles:
+            h.remove()
+        self._handles.clear()
 
 
-def chunk_text(tokenizer, text: str, max_seq_len: int) -> list[list[int]]:
-    """Reproduce trainer's process_pretrain_example chunking exactly."""
-    tokens = tokenizer.encode(text, add_special_tokens=False) + [tokenizer.eos_token_id]
-    return [tokens[i : i + max_seq_len] for i in range(0, len(tokens), max_seq_len)]
-
-
-def main() -> None:
+def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model_path", required=True, help="HF model path or local dir")
-    ap.add_argument("--data_path", required=True, help="JSONL with one text per line")
-    ap.add_argument("--output_dir", required=True, help="Where to write cache shards")
-    ap.add_argument("--layers", required=True, help="Comma-separated layer indices, e.g. 7,14,21,28")
-    ap.add_argument("--text_key", default="text")
-    ap.add_argument("--max_seq_len", type=int, default=2048)
+    ap.add_argument("--model_path", required=True)
+    ap.add_argument("--data_path", required=True)
+    ap.add_argument("--output_dir", required=True)
+    ap.add_argument("--layers", default="all",
+                    help="Comma-separated layer indices or 'all' (default: all)")
+    ap.add_argument("--max_seq_len", type=int, default=4096)
     ap.add_argument("--max_examples", type=int, default=None)
-    ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16"])
-    ap.add_argument("--device", default="cuda:0")
-    ap.add_argument("--device_map", default=None, help="HF device_map, e.g. 'auto' for big teachers")
-    ap.add_argument(
-        "--max_memory",
-        default=None,
-        help=(
-            "JSON dict for HF accelerate per-device caps, e.g. "
-            "'{\"0\":\"28GB\",\"1\":\"18GB\",\"cpu\":\"60GB\"}'. "
-            "Use with --device_map auto to leave headroom for layer swap-in "
-            "during forward; avoids the OOM when accelerate tries to page a "
-            "CPU-resident layer onto a near-full GPU."
-        ),
-    )
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--dtype", default="bfloat16")
+    ap.add_argument("--device_map", default="auto")
+    ap.add_argument("--max_memory", default=None,
+                    help='e.g. \'{"0": "28GiB", "cpu": "80GiB"}\'')
+    ap.add_argument("--quantize", default=None, choices=["8bit", "4bit", None],
+                    help="Quantize model with bitsandbytes (8bit or 4bit)")
+    ap.add_argument("--force", action="store_true",
+                    help="Overwrite existing cache files")
     args = ap.parse_args()
 
-    layers = sorted({int(x) for x in args.layers.split(",")})
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[precompute] output_dir={output_dir}  layers={layers}  max_seq_len={args.max_seq_len}")
+    print(f"[precompute] max_seq_len={args.max_seq_len}  layers={args.layers}")
 
-    print(f"[precompute] loading tokenizer + model from {args.model_path}")
     tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
 
-    model_kwargs = dict(torch_dtype=dtype, trust_remote_code=True)
-    if args.device_map:
-        model_kwargs["device_map"] = args.device_map
+    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+
+    model_kwargs = dict(
+        torch_dtype=dtype,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+        device_map=args.device_map,
+    )
+    if args.quantize:
+        from transformers import BitsAndBytesConfig
+        bnb_kwargs = dict(
+            load_in_4bit=args.quantize == "4bit",
+            load_in_8bit=args.quantize == "8bit",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(**bnb_kwargs)
     if args.max_memory:
-        # accelerate wants int keys for GPU/XPU device ids ("cpu" / "disk" stay strings).
         raw = json.loads(args.max_memory)
-        model_kwargs["max_memory"] = {int(k) if k.isdigit() else k: v for k, v in raw.items()}
+        model_kwargs["max_memory"] = {
+            int(k) if str(k).lstrip("-").isdigit() else k: v
+            for k, v in raw.items()
+        }
+
+    print("[precompute] Loading model ...")
     model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_kwargs)
-    if not args.device_map:
-        model = model.to(args.device)
+
+    if hasattr(model, "lm_head"):
+        model.lm_head = None
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
 
-    cfg = model.config
-    num_layers = cfg.num_hidden_layers
-    hidden_size = cfg.hidden_size
-    bad = [i for i in layers if not (0 <= i <= num_layers)]
-    if bad:
-        raise ValueError(
-            f"layers {bad} out of range [0, {num_layers}] "
-            f"(model has {num_layers} transformer blocks + 1 embedding output)"
-        )
+    num_layers = model.config.num_hidden_layers
+    hidden_size = model.config.hidden_size
+    layer_indices = parse_layer_spec(args.layers, num_layers)
 
-    manifest = {
-        "model_path": args.model_path,
-        "tokenizer_name_or_path": getattr(tok, "name_or_path", args.model_path),
-        "num_hidden_layers": num_layers,
-        "hidden_size": hidden_size,
-        "layers": layers,
-        "max_seq_len": args.max_seq_len,
-        "dtype": args.dtype,
-        "schema": "v2-chunked",
-    }
-    with open(output_dir / "manifest.json", "w") as f:
-        json.dump(manifest, f, indent=2)
-    print(f"[precompute] manifest: {manifest}")
+    n = len(layer_indices)
+    preview = layer_indices[:4]
+    if n > 4:
+        preview.append(layer_indices[-1])
+    print(f"[precompute] Capturing {n} layers: {preview}")
 
-    device = args.device if not args.device_map else model.device
+    device = next(iter(model.parameters())).device
+
+    has_embed = 0 in layer_indices
+    non_embed = [l for l in layer_indices if l > 0]
+
+    capture = HiddenCapture()
+    capture.register(model, non_embed)
 
     skipped = written = chunks_seen = 0
     t0 = time.time()
 
-    for txt in iter_jsonl_texts(args.data_path, args.text_key, args.max_examples):
-        for chunk in chunk_text(tok, txt, args.max_seq_len):
-            chunks_seen += 1
-            ids_cpu = torch.tensor(chunk, dtype=torch.long)
-            h = hash_chunk(ids_cpu)
-            p = cache_path(output_dir, h)
-            if p.exists():
-                skipped += 1
+    with open(args.data_path, encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if args.max_examples is not None and i >= args.max_examples:
+                break
+            try:
+                text = json.loads(line)["text"]
+            except Exception:
                 continue
 
-            input_ids = ids_cpu.unsqueeze(0).to(device)
-            attn = torch.ones_like(input_ids)
-            with torch.inference_mode():
-                out = model(
-                    input_ids=input_ids,
-                    attention_mask=attn,
-                    output_hidden_states=True,
-                    use_cache=False,
-                )
-            hs = out.hidden_states  # tuple of (num_layers+1) [1, S, D]
+            tokens = tok.encode(text, add_special_tokens=False) + [tok.eos_token_id]
 
-            shard = {
-                f"hidden_layer_{li}": hs[li][0].to(dtype).cpu().contiguous() for li in layers
-            }
-            shard["input_ids"] = ids_cpu.contiguous()
-            p.parent.mkdir(parents=True, exist_ok=True)
-            save_file(shard, str(p))
-            written += 1
+            for j in range(0, len(tokens), args.max_seq_len):
+                chunk = tokens[j:j + args.max_seq_len]
+                chunks_seen += 1
 
-            done = written + skipped
-            if done and done % 50 == 0:
-                rate = done / max(time.time() - t0, 1e-6)
-                print(
-                    f"[precompute] {done} chunks ({written} written, {skipped} skipped, "
-                    f"{chunks_seen} seen) {rate:.1f} chunk/s"
-                )
+                ids_cpu = torch.tensor(chunk, dtype=torch.long)
+                h = hash_chunk(ids_cpu)
+                p = cache_path(output_dir, h)
+
+                if p.exists() and not args.force:
+                    skipped += 1
+                    continue
+
+                input_ids = ids_cpu.unsqueeze(0).to(device)
+                attn_mask = torch.ones_like(input_ids)
+
+                with torch.inference_mode():
+                    capture.hiddens.clear()
+                    _ = model.model(
+                        input_ids=input_ids,
+                        attention_mask=attn_mask,
+                        use_cache=False,
+                    )
+                    if has_embed and hasattr(model.model, "embed_tokens"):
+                        capture.hiddens[0] = (
+                            model.model.embed_tokens(input_ids).detach().cpu()
+                        )
+
+                shard = {}
+                for li in layer_indices:
+                    t = capture.hiddens.get(li)
+                    if t is not None:
+                        shard[f"hidden_layer_{li}"] = t[0].to(dtype).cpu().contiguous()
+                shard["input_ids"] = ids_cpu.contiguous()
+
+                p.parent.mkdir(parents=True, exist_ok=True)
+                save_file(shard, str(p))
+                written += 1
+
+                if (written + skipped) % 50 == 0:
+                    rate = (written + skipped) / (time.time() - t0)
+                    print(f"[{written+skipped:5d}]  written={written}  "
+                          f"{rate:.1f} chunk/s")
+
+    capture.remove()
+
+    manifest = {
+        "num_hidden_layers": num_layers,
+        "hidden_size": hidden_size,
+        "layers": layer_indices,
+    }
+    manifest_path = output_dir / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f)
+    print(f"  manifest -> {manifest_path}")
 
     elapsed = time.time() - t0
-    print(
-        f"[precompute] done. {written} written, {skipped} skipped, "
-        f"{chunks_seen} chunks seen in {elapsed:.0f}s"
-    )
-    print(f"[precompute] cache root: {output_dir}")
+    print(f"\nDone \u2014 Written: {written}  Skipped: {skipped}  "
+          f"Total chunks: {chunks_seen}  "
+          f"{elapsed:.1f}s  {(written+skipped)/elapsed:.1f} chunk/s")
 
 
 if __name__ == "__main__":
