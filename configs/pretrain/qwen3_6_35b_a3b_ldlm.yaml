@@ -1,0 +1,62 @@
+model:
+  model_path: Qwen/Qwen3.6-35B-A3B
+  attn_implementation: eager
+  ldlm:
+    enabled: true
+    encoder_model_name: Qwen/Qwen3.6-35B-A3B
+    seq_len: 64
+    depth: 4
+    decoder_noise_std: 3.0
+    encoder_hidden_layer: -3
+    decoder_num_layers: 2
+    diffusion_head_depth: 3
+    warmup_steps: 50000
+    warmup_gamma_min: 0.001
+    tangent_d: 3.0
+    self_condition_prob: 0.5
+    log_interval: 50
+    gen_eval_interval: 2000
+    log_latent_histograms: true
+    log_samples: true
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 100000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 64
+  text_keys: text
+  drop_last: true
+
+train:
+  output_dir: /run/media/johndpope/12TB/open_dllm/checkpoints/35b_a3b_ldlm
+  data_parallel_mode: ddp
+  ulysses_parallel_size: 1
+  global_batch_size: 16
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 200
+  optimizer: adamw
+  lr: 3.0e-4
+  lr_warmup_ratio: 0.007
+  lr_decay_style: constant
+  lr_decay_ratio: 1.0
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  enable_mixed_precision: false
+  enable_gradient_checkpointing: false
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 100
+  ckpt_manager: bytecheckpoint
+  load_checkpoint_path: ""
+  save_steps: 500
+  save_hf_weights: true
+  wandb_project: Qwen3.6-35B-A3B-LDLM
+  wandb_name: Qwen3.6-35B-A3B-LDLM-paper-recipe

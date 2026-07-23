@@ -47,7 +47,10 @@ CUDA_REQUIRE = ["liger-kernel>=0.4.1,<1.0"]
 
 NPU_REQUIRE = ["torchvision>=0.16.0,<0.16.1"]
 
-EXTRAS_REQUIRE = {"dev": ["pre-commit>=4.0.0,<5.0", "ruff>=0.7.0,<1.0", "pytest>=6.0.0,<8.0", "expecttest>=0.3.0"]}
+EXTRAS_REQUIRE = {
+    "dev": ["pre-commit>=4.0.0,<5.0", "ruff>=0.7.0,<1.0", "pytest>=6.0.0,<8.0", "expecttest>=0.3.0"],
+    "deepspeed": ["deepspeed>=0.15.0"],
+}
 
 BASE_REQUIRE = [
     "byted-hdfs-io",
@@ -55,7 +58,7 @@ BASE_REQUIRE = [
     "tiktoken>=0.9.0",
     "blobfile>=3.0.0",
     "bytecheckpoint",
-    "transformers==4.54.1",
+    "transformers>=4.57.6",  # 4.57.6+ required for qwen3_next (Qwen3.5/3.6) and qwen3_vl support
     "accelerate",
     "datasets",
     "peft",

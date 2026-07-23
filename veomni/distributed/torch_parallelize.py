@@ -73,12 +73,13 @@ def build_parallelize_model(
     fsdp_no_shard_states = None
 
     if not parallel_state.fsdp_enabled or parallel_state.dp_mode != "fsdp1":
-        if kwargs.get("init_device") != "cuda":
-            raise ValueError("Only FSDP1 training supports `init_device=cpu` or `init_device=meta`.")
-        if kwargs.pop("enable_fsdp_offload", False):
-            raise ValueError("Only FSDP1 training supports `enable_fsdp_offload`.")
+        if parallel_state.dp_mode != "deepspeed":
+            if kwargs.get("init_device") != "cuda":
+                raise ValueError("Only FSDP1 training supports `init_device=cpu` or `init_device=meta`.")
+            if kwargs.pop("enable_fsdp_offload", False):
+                raise ValueError("Only FSDP1 training supports `enable_fsdp_offload`.")
 
-    if enable_mixed_precision:  # upcast to float32 before feed it to optimizer
+    if enable_mixed_precision and parallel_state.dp_mode != "deepspeed":  # DS manages precision internally
         model = model.float()
 
     if enable_gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
@@ -111,6 +112,14 @@ def build_parallelize_model(
         ep_param_suffix = None
         fsdp_no_shard_states = None
         fsdp_no_shard_states_fqn = None
+
+    if parallel_state.dp_mode == "deepspeed":
+        logger.info_rank0("DeepSpeed mode: skipping FSDP/DDP wrapping. Engine init deferred to trainer.")
+        # Params are already ZeRO-3 partitioned: train_torch.py enters a
+        # zero.Init() context (with meta-tensor patch) before build_foundation_model,
+        # which partitions each param on-the-fly during model.__init__.
+        # deepspeed.initialize() + load_hf_weights_zero3() follow in the trainer.
+        return model
 
     if parallel_state.fsdp_enabled:
         logger.info_rank0(f"Apply data parallel to the model: {parallel_state.dp_mode}.")
@@ -177,17 +186,28 @@ def build_parallelize_model(
                 fsdp_kwargs["sync_module_states"] = True
                 if get_parallel_state().global_rank != 0:
                     fsdp_kwargs["param_init_fn"] = init_fsdp_fn(model, device="cuda")
-            elif kwargs.get("init_device") == "meta":
+            # Peek (don't pop) so the loader can choose CPU storage when
+            # offload is on. Pop later, after both potential parallel_load
+            # calls have fired.
+            _fsdp_offload_enabled = kwargs.get("enable_fsdp_offload", False)
+            _load_device = "cpu" if _fsdp_offload_enabled else None
+
+            if kwargs.get("init_device") == "meta":
                 weights_path = kwargs.pop("weights_path", None)
                 assert weights_path is not None, "`weights_path` must be provided when `init_device=meta`."
 
-                logger.info_rank0("Enable meta initialization.")
+                logger.info_rank0(
+                    f"Enable meta initialization. Weight load device: "
+                    f"{_load_device or 'current cuda'}."
+                )
                 ignore_param_names = (
                     [".".join([fqn, k]) for fqn in fsdp_no_shard_states_fqn for k in ep_param_suffix]
                     if fsdp_no_shard_states_fqn is not None
                     else None
                 )
-                shard_states = parallel_load_safetensors(weights_path, ignore_param_name=ignore_param_names)
+                shard_states = parallel_load_safetensors(
+                    weights_path, ignore_param_name=ignore_param_names, device=_load_device
+                )
                 fsdp_kwargs["param_init_fn"] = parallel_init_fsdp_fn(
                     model, shard_states, ignore_param_name=ignore_param_names
                 )
@@ -212,7 +232,9 @@ def build_parallelize_model(
                     no_shard_module = get_module_from_path(model, fqn)
                     if kwargs.get("init_device") == "meta":
                         specific_param_name = [".".join([fqn, k]) for k in ep_param_suffix]
-                        shard_states = parallel_load_safetensors(weights_path, specific_param_name=specific_param_name)
+                        shard_states = parallel_load_safetensors(
+                            weights_path, specific_param_name=specific_param_name, device=_load_device
+                        )
                         for suffix in ep_param_suffix:
                             shard_states[suffix] = shard_states.pop(".".join([fqn, suffix]))
                         fsdp_kwargs["param_init_fn"] = parallel_init_fsdp_fn(

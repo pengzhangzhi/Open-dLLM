@@ -34,7 +34,7 @@ def get_device_flops(unit="T"):
         return number
 
     device_name = torch.cuda.get_device_name()
-    flops = float("inf")  # INF flops for unkown gpu type
+    flops = float("inf")
     if "H100" in device_name or "H800" in device_name:
         flops = 989e12
     elif "A100" in device_name or "A800" in device_name:
@@ -47,6 +47,12 @@ def get_device_flops(unit="T"):
         flops = 148e12
     elif "910B" in device_name:
         flops = 354e12
+    elif "RTX 5090" in device_name:
+        flops = 335e12
+    elif "RTX PRO 6000" in device_name:
+        flops = 335e12
+    elif "RTX PRO 4000" in device_name:
+        flops = 120e12
     flops_unit = unit_convert(flops, unit)
     return flops_unit
 
@@ -64,6 +70,7 @@ class VeomniFlopsCounter:
     def __init__(self, config: PretrainedConfig):
         self.estimate_func = {
             "qwen2_vl": self._estimate_qwen2_vl_flops,
+            "qwen3_5_text": self._estimate_qwen3_5_text_flops,
             "deepseek_v3": self._estimate_deepseek_v3_flops,
         }
         self.config = config
@@ -156,6 +163,38 @@ class VeomniFlopsCounter:
 
         # all_layer & all_token fwd & bwd flops
         flops_all_token = dense_N_flops + attn_qkv_flops + vit_flops
+        flops_achieved = flops_all_token * (1.0 / delta_time) / 1e12
+        return flops_achieved
+
+    def _estimate_qwen3_5_text_flops(self, tokens_sum, batch_seqlens, delta_time, **kwargs):
+        cfg = self.config
+        hidden_size = cfg.hidden_size
+        vocab_size = cfg.vocab_size
+        num_hidden_layers = cfg.num_hidden_layers
+        num_key_value_heads = cfg.num_key_value_heads
+        num_attention_heads = cfg.num_attention_heads
+        intermediate_size = cfg.intermediate_size
+        head_dim = hidden_size // num_attention_heads
+        q_size = num_attention_heads * head_dim
+        k_size = num_key_value_heads * head_dim
+        v_size = num_key_value_heads * head_dim
+
+        full_attn_layers = (num_hidden_layers + 3) // 4
+        linear_attn_layers = num_hidden_layers - full_attn_layers
+
+        mlp_N = hidden_size * intermediate_size * 3
+        full_attn_linear_N = hidden_size * (q_size + k_size + v_size + num_attention_heads * head_dim)
+        linear_attn_linear_N = hidden_size * (q_size + k_size + v_size + num_attention_heads * head_dim)
+        emd_and_lm_head_N = vocab_size * hidden_size * 2
+
+        dense_N = (mlp_N + full_attn_linear_N) * full_attn_layers + (mlp_N + linear_attn_linear_N) * linear_attn_layers + emd_and_lm_head_N
+        dense_N_flops = 6 * dense_N * tokens_sum
+
+        seqlen_square_sum = sum(s * s for s in batch_seqlens)
+        full_attn_qkv_flops = 12 * seqlen_square_sum * head_dim * num_attention_heads * full_attn_layers
+        linear_attn_flops = 6 * tokens_sum * head_dim * num_attention_heads * linear_attn_layers
+
+        flops_all_token = dense_N_flops + full_attn_qkv_flops + linear_attn_flops
         flops_achieved = flops_all_token * (1.0 / delta_time) / 1e12
         return flops_achieved
 

@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
 
 import torch
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedModel
-from transformers.modeling_utils import no_init_weights
 
 from ..auto import build_foundation_model, build_processor
 from ..module_utils import init_empty_weights, load_model_weights
@@ -150,7 +149,7 @@ def build_omni_model(
         with torch.device(init_device):
             model = SeedOmniModel._from_config(**init_kwargs)
     else:
-        with init_empty_weights(), no_init_weights():
+        with init_empty_weights():
             model = SeedOmniModel._from_config(**init_kwargs)
 
     if weights_path is not None and not empty_init:

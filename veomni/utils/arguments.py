@@ -71,9 +71,13 @@ class ModelArguments:
         default=False,
         metadata={"help": "Whether to encode target with decoder. Only supports stable diffusion as decoder."},
     )
-    attn_implementation: Optional[Literal["eager", "sdpa", "flash_attention_2"]] = field(
+    attn_implementation: Optional[Literal["eager", "sdpa", "flash_attention_2", "tropical"]] = field(
         default="flash_attention_2",
-        metadata={"help": "Attention implementation to use."},
+        metadata={"help": "Attention implementation to use. 'tropical' uses min-plus attention via LogSumExp identity."},
+    )
+    tau: float = field(
+        default=0.1,
+        metadata={"help": "Temperature for tropical attention (lower = sharper min-plus, 0.01 ≈ hard-min)."},
     )
     moe_implementation: Optional[Literal[None, "eager", "fused"]] = field(
         default=None,
@@ -82,6 +86,26 @@ class ModelArguments:
     basic_modules: Optional[List[str]] = field(
         default_factory=list,
         metadata={"help": "Basic modules beyond model._no_split_modules to be sharded in FSDP."},
+    )
+    enable_nvfp4_qat: bool = field(
+        default=False,
+        metadata={"help": "Enable NVFP4 quantization-aware training (Blackwell 4-bit). Replaces nn.Linear with NVFP4FakeQuantizedLinear."},
+    )
+    enable_qlorafy: bool = field(
+        default=False,
+        metadata={"help": "Enable QLoRA: 4-bit NF4 base + LoRA adapters. Dramatically reduces VRAM for training."},
+    )
+    qlorafy_config: Optional[Dict[str, Any]] = field(
+        default_factory=dict,
+        metadata={"help": "QLoRA config dict (r, lora_alpha, target_modules, etc.). See veomni.models.qlorafy.QLoRAConfig."},
+    )
+    ldlm: Dict[str, Any] = field(
+        default_factory=dict,
+        metadata={"help": "LDLM configuration (autoencoder, diffusion head, sampler)."},
+    )
+    vfm: Dict[str, Any] = field(
+        default_factory=dict,
+        metadata={"help": "VFM configuration (adapter_layers, adapter_heads, tau, sigma, alpha, freeze_base)."},
     )
 
     def __post_init__(self):
@@ -126,6 +150,10 @@ class DataArguments:
         default=10_000_000,
         metadata={"help": "Number of tokens for training to compute training steps for dynamic batch dataloader."},
     )
+    eval_size: int = field(
+        default=0,
+        metadata={"help": "Number of examples to hold out for perplexity eval. 0 = no eval."},
+    )
     data_type: Literal["plaintext", "conversation"] = field(
         default="conversation",
         metadata={"help": "Type of the training data."},
@@ -166,9 +194,9 @@ class DataArguments:
         default=2,
         metadata={"help": "Number of workers to load data."},
     )
-    prefetch_factor: int = field(
-        default=2,
-        metadata={"help": "Number of batches loaded in advance by each worker."},
+    prefetch_factor: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of batches loaded in advance by each worker. None when num_workers=0."},
     )
     drop_last: bool = field(
         default=True,
@@ -210,7 +238,7 @@ class TrainingArguments:
         default=0,
         metadata={"help": "L2 regularization strength."},
     )
-    optimizer: Literal["adamw", "anyprecision_adamw", "apollo", "galore", "scale"] = field(
+    optimizer: Literal["adamw", "anyprecision_adamw", "apollo", "galore", "scale", "persistent_sparse_adam"] = field(
         default="adamw",
         metadata={"help": "Optimizer. Default to adamw."},
     )
@@ -245,6 +273,179 @@ class TrainingArguments:
     repr_align_wt: float = field(
         default=0.0,
         metadata={"help": "Weight for representation alignment loss (0 = disabled). Used for MDM training with teacher model."},
+    )
+    anchor_cache_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Directory of precomputed teacher hidden states (produced by "
+                "scripts/precompute_anchor.py). When set, the trainer skips the "
+                "live-teacher deepcopy and loads anchors from disk per batch. "
+                "Repr-Align is realignment, not distillation: the teacher's output "
+                "for a given input is deterministic, so caching is strictly equivalent "
+                "to running the live teacher every step."
+            )
+        },
+    )
+    align_layers: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Comma-separated layer indices to use in the repr_align cosine loss, "
+                "e.g. '6,12,18,24'. Indices are 0=embedding output, 1..N=transformer "
+                "blocks."
+            )
+        },
+    )
+    repr_align_sub_sample_ratio: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Fraction of valid tokens to sub-sample for the repr_align cosine loss "
+                "(1.0 = all tokens). Setting < 1.0 reduces gradient memory for the "
+                "alignment branch proportionally. E.g. 0.25 = 4× memory cut."
+            )
+        },
+    )
+    repr_align_num_sample_layers: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Number of layers to randomly sample per step for the repr_align cosine "
+                "loss (None = all configured layers). E.g. with align_layers='7,14,21,28' "
+                "(4 layers), setting 2 halves layer-axis gradient memory. Combine with "
+                "repr_align_sub_sample_ratio for multiplicative savings."
+            )
+        },
+    )
+    # ------------------------------------------------------------------
+    # Replay buffer for Repr-Align — stores past batches and replays
+    # alignment loss on old data to prevent catastrophic forgetting.
+    # Requires repr_align_wt > 0 and anchor_cache_dir.
+    # Off when replay_buffer_capacity == 0.
+    # Reference: VFM Ripple NoiseReplayBuffer.
+    # ------------------------------------------------------------------
+    replay_buffer_capacity: int = field(
+        default=0,
+        metadata={"help": "Capacity of the ReprAlign replay buffer (0 = disabled). Stores past micro_batches and replays cosine alignment on old data."},
+    )
+    replay_prob: float = field(
+        default=0.3,
+        metadata={"help": "Probability of sampling from replay buffer each step (only when buffer is warm)."},
+    )
+    replay_warmup_steps: int = field(
+        default=50,
+        metadata={"help": "Minimum number of stored batches before replay sampling begins. Prevents sparse-buffer noise."},
+    )
+    replay_weight: float = field(
+        default=0.1,
+        metadata={"help": "Weight for the replay cosine alignment loss relative to current-batch alignment."},
+    )
+    # ------------------------------------------------------------------
+    # d3LLM-style trajectory-guided masking for Repr-Align training.
+    # Replaces random masking with teacher-trajectory-guided masking.
+    # Requires trajectory_data_path to be set (pre-computed trajectories).
+    # ------------------------------------------------------------------
+    trajectory_data_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to pre-computed trajectories JSONL (d3LLM-style). When set, replaces random masking with trajectory-guided masking."},
+    )
+    trajectory_min_mask_ratio: float = field(
+        default=0.0,
+        metadata={"help": "Starting mask ratio for curriculum schedule (0.0 = all tokens visible). Increases linearly to max over training."},
+    )
+    trajectory_max_mask_ratio: float = field(
+        default=0.8,
+        metadata={"help": "Ending mask ratio for curriculum schedule. Tokens masked at training time according to trajectory order."},
+    )
+    trajectory_progressive_block_sizes: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated list of block sizes for progressive curriculum, e.g. '16,24,32'. Each epoch uses the interpolated size between entries. None = full-sequence masking."},
+    )
+    trajectory_use_blockwise: bool = field(
+        default=False,
+        metadata={"help": "If True, only predict a random block per sample; otherwise mask the entire response region."},
+    )
+    trajectory_entropy_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for entropy regularization loss on correctly-predicted masked tokens (d3LLM-style). 0 = disable."},
+    )
+    trajectory_temperature: float = field(
+        default=0.5,
+        metadata={"help": "Temperature for entropy regularization softmax."},
+    )
+    # ------------------------------------------------------------------
+    # Cola DLM (Continuous Latent Diffusion LM, arXiv:2605.06548)
+    # auxiliary head on top of Repr-Align. Off when cola_wt == 0.
+    # See veomni/models/cola_ldm/.
+    # ------------------------------------------------------------------
+    cola_wt: float = field(
+        default=0.0,
+        metadata={"help": "Weight for Cola DLM auxiliary loss (Text VAE + block-causal DiT). 0 = disabled."},
+    )
+    cola_num_global: int = field(
+        default=16,
+        metadata={"help": "Number of global semantic latents in the Cola Text VAE encoder."},
+    )
+    cola_num_local: int = field(
+        default=64,
+        metadata={"help": "Number of local detail latents in the Cola Text VAE encoder."},
+    )
+    cola_block_size: int = field(
+        default=16,
+        metadata={"help": "Local block size for the Cola block-causal DiT attention mask."},
+    )
+    cola_encoder_depth: int = field(
+        default=2,
+        metadata={"help": "Depth of each Perceiver in the Cola Text VAE encoder."},
+    )
+    cola_diffusion_depth: int = field(
+        default=4,
+        metadata={"help": "Depth of the Cola block-causal DiT."},
+    )
+    cola_heads: int = field(
+        default=8,
+        metadata={"help": "Number of attention heads in the Cola head (must divide hidden dim)."},
+    )
+    cola_source_layer: int = field(
+        default=-3,
+        metadata={"help": "Which LM hidden-state layer to feed into the Cola head (-1 = last)."},
+    )
+    cola_detach_student: bool = field(
+        default=True,
+        metadata={"help": "Detach LM hidden states before the Cola head so its gradient doesn't flow into the student."},
+    )
+    cola_log_hist_every: int = field(
+        default=200,
+        metadata={"help": "How often (in global steps) to log Cola latent histograms to wandb. Set 0 to disable."},
+    )
+    cola_prediction: str = field(
+        default="v",
+        metadata={"help": "Cola DiT prediction target: 'v' (Flow Matching velocity, paper default) or 'x0' (x0-prediction MSE)."},
+    )
+    cola_variant: str = field(
+        default="block_causal",
+        metadata={"help": "ColaDLM causal diffusion variant: 'block_causal' (Guide Labs), 'card' (soft-tail), 'fast_block' (Fast-dLLM v2)."},
+    )
+    cola_lambda_tail: float = field(
+        default=0.6,
+        metadata={"help": "CARD soft-tail aggressiveness (0.0–1.0). Only used when cola_variant='card'."},
+    )
+    # ------------------------------------------------------------------
+    # MTP (Multi-Token Prediction, Qwen3.6-style NextN)
+    # auxiliary head. Off when mtp_num_layers == 0.
+    # ------------------------------------------------------------------
+    mtp_num_layers: int = field(
+        default=0,
+        metadata={"help": "Number of MTP prediction layers (0 = disabled)."},
+    )
+    mtp_loss_weight: float = field(
+        default=0.1,
+        metadata={"help": "MTP auxiliary loss scaling factor."},
+    )
+    mtp_n_predict: int = field(
+        default=1,
+        metadata={"help": "Number of future tokens MTP head predicts."},
     )
     dyn_bsz: bool = field(
         default=True,
@@ -334,9 +535,37 @@ class TrainingArguments:
         default=500,
         metadata={"help": "Number of steps between two empty cache operations."},
     )
-    data_parallel_mode: Literal["ddp", "fsdp1", "fsdp2", "fsdp2-vescale"] = field(
+    data_parallel_mode: Literal["ddp", "deepspeed", "fsdp1", "fsdp2", "fsdp2-vescale"] = field(
         default="ddp",
         metadata={"help": "Data parallel mode."},
+    )
+    ds_zero_stage: Literal[1, 2, 3] = field(
+        default=3,
+        metadata={"help": "DeepSpeed ZeRO optimization stage (1, 2, or 3). Only used when data_parallel_mode=deepspeed."},
+    )
+    ds_offload_optimizer: Optional[Literal["cpu", "nvme"]] = field(
+        default=None,
+        metadata={"help": "Offload optimizer state to 'cpu' or 'nvme'. None = no offload."},
+    )
+    ds_offload_param: Optional[Literal["cpu", "nvme"]] = field(
+        default=None,
+        metadata={"help": "Offload parameters to 'cpu' or 'nvme' (ZeRO-3 only). None = no offload."},
+    )
+    ds_nvme_path: str = field(
+        default="",
+        metadata={"help": "Directory path for NVMe offload. Required when offload to 'nvme'."},
+    )
+    ds_overlap_comm: bool = field(
+        default=True,
+        metadata={"help": "Overlap communication with computation in DeepSpeed ZeRO."},
+    )
+    ds_contiguous_gradients: bool = field(
+        default=True,
+        metadata={"help": "Use contiguous gradient buffers in DeepSpeed ZeRO."},
+    )
+    ds_config_path: str = field(
+        default="",
+        metadata={"help": "Path to a custom DeepSpeed JSON config. Overrides all ds_* fields."},
     )
     tensor_parallel_size: int = field(
         default=1,
@@ -400,9 +629,25 @@ class TrainingArguments:
         default=True,
         metadata={"help": "Save the huggingface format weights to the last checkpoint dir."},
     )
+    save_total_limit: int = field(
+        default=0,
+        metadata={"help": "Maximum number of step-based checkpoints to keep. 0 = keep all. Oldest are deleted first."},
+    )
+    save_optimizer_state: bool = field(
+        default=True,
+        metadata={"help": "Save DeepSpeed ZeRO optimizer state with each checkpoint. Set False to save only HF weights (~54GB for 27B) and skip the full ZeRO state (~211GB). Cannot resume training when False."},
+    )
     freeze_layers: Optional[str] = field(
         default=None,
         metadata={"help": "Comma-separated layer patterns to freeze (e.g., 'attn,mlp'). Uses case-insensitive substring matching."},
+    )
+    quantize_frozen: bool = field(
+        default=False,
+        metadata={"help": "If true, apply torchao weight-only quantization to all Linear modules whose params are entirely frozen. Cuts resident weight VRAM ~2-4x. Requires `pip install torchao`. Applied after freeze_layers, before FSDP wrap."},
+    )
+    quantize_frozen_dtype: Literal["int8", "int4"] = field(
+        default="int8",
+        metadata={"help": "Precision for quantize_frozen. int8 ~halves weight memory with no measurable quality loss; int4 ~quarters it but may hurt convergence on small finetunes."},
     )
     seed: int = field(
         default=42,
@@ -460,9 +705,9 @@ class TrainingArguments:
 
     def __post_init__(self):
         self._train_steps = -1
-        self.local_rank = int(os.getenv("LOCAL_RANK"))
-        self.global_rank = int(os.getenv("RANK"))
-        self.world_size = int(os.getenv("WORLD_SIZE"))
+        self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        self.global_rank = int(os.getenv("RANK", "0"))
+        self.world_size = int(os.getenv("WORLD_SIZE", "1"))
         if self.context_parallel_size > 1 or self.ulysses_parallel_size > 1:
             if self.world_size % (self.context_parallel_size * self.ulysses_parallel_size) != 0:
                 raise ValueError("World size should be a multiple of context_parallel_size * ulysses_parallel_size.")
@@ -499,6 +744,27 @@ class TrainingArguments:
 
         if self.gradient_accumulation_steps > 1 and self.enable_fsdp_offload:
             raise ValueError("Gradient accumulation is not supported with FSDP offload.")
+
+        # ── DeepSpeed validation ──
+        if self.data_parallel_mode == "deepspeed":
+            if self.ds_zero_stage not in (1, 2, 3):
+                raise ValueError(f"ds_zero_stage must be 1, 2, or 3, got {self.ds_zero_stage}.")
+            if self.ds_offload_param is not None and self.ds_zero_stage != 3:
+                raise ValueError(
+                    f"ds_offload_param={self.ds_offload_param!r} requires zero_stage=3, got {self.ds_zero_stage}."
+                )
+            if "nvme" in (str(self.ds_offload_optimizer or ""), str(self.ds_offload_param or "")):
+                if not self.ds_nvme_path or not os.path.isdir(self.ds_nvme_path):
+                    raise ValueError(
+                        f"NVMe offload requires a valid ds_nvme_path directory, got: '{self.ds_nvme_path}'."
+                    )
+            # zero.Init() (and meta tensors) are only needed for ZeRO-3 parameter
+            # partitioning. ZeRO-1/2 replicate weights like DDP — init on cuda directly.
+            if self.ds_zero_stage == 3 and self.init_device not in ("cpu", "meta"):
+                logger.info_rank0(
+                    f"Forcing init_device='meta' for DeepSpeed ZeRO-3 (was '{self.init_device}')."
+                )
+                object.__setattr__(self, "init_device", "meta")
 
         self.dataloader_batch_size = self.global_batch_size // self.data_parallel_size  # = micro bsz * grad accu
 

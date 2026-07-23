@@ -22,19 +22,25 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Literal,
 from functools import partial
 
 import torch
+
 # from hdfs_io import hput
 from torch import distributed as dist
 from torch import nn
 from tqdm import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, WEIGHTS_INDEX_NAME, WEIGHTS_NAME
 from transformers.utils.hub import cached_file, get_checkpoint_shard_files
-from transformers.utils.import_utils import is_safetensors_available
 
 from ..utils import logging
 from ..utils.helper import empty_cache, get_cache_dir, get_dtype_size
 
 
-if is_safetensors_available():
+try:
+    import safetensors
+    _is_safetensors_available = True
+except ImportError:
+    _is_safetensors_available = False
+
+if _is_safetensors_available:
     from safetensors import safe_open
     from safetensors.torch import save_file
 
@@ -60,10 +66,13 @@ def init_empty_weights():
     def register_empty_parameter(module: "nn.Module", name: str, param: "nn.Parameter"):
         old_register_parameter(module, name, param)
         if param is not None:
-            param_cls = type(module._parameters[name])
-            kwargs = module._parameters[name].__dict__
-            kwargs["requires_grad"] = param.requires_grad
-            module._parameters[name] = param_cls(module._parameters[name].to("meta"), **kwargs)
+            existing = module._parameters[name]
+            # ZeRO-3 params carry ds_* attributes in __dict__; passing them to
+            # Parameter.__new__() raises TypeError.  Leave them untouched.
+            if hasattr(existing, "ds_param_type"):
+                return
+            param_cls = type(existing)
+            module._parameters[name] = param_cls(existing.to("meta"), requires_grad=param.requires_grad)
 
     try:
         nn.Module.register_parameter = register_empty_parameter
@@ -395,6 +404,9 @@ def save_model_assets(output_dir: Union[str, "os.PathLike"], model_assets: Seque
         hput(output_dir, hdfs_upper_dir, force=True, thread_num=32, chunk_thread_num=32, chunk_size=128)
         logger.info(f"Model config and tokenizer uploaded to {hdfs_dir}.")
 
+
+
+from functools import partial
 
 
 class GradientCheckpointingLayer(nn.Module):

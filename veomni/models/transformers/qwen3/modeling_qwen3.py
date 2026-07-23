@@ -4,7 +4,6 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
-from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import (
@@ -24,12 +23,11 @@ from transformers.utils import (
 )
 
 from veomni.models.transformers.qwen2.generation_utils import MDMGenerationMixin
+from veomni.models.transformers.qwen2.multi_block_generation import MultiBlockDecoderMixin
 
 from ....data.constants import IGNORE_INDEX
 from ....distributed.parallel_state import get_parallel_state
 from ....distributed.sequence_parallel import (
-    gather_heads_scatter_seq,
-    gather_seq_scatter_heads,
     reduce_sequence_parallel_loss,
     slice_position_embedding,
 )
@@ -176,6 +174,41 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+def tropical_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    tau: float = 0.1,
+    **kwargs,
+):
+    """
+    Tropical attention implementation via LogSumExp identity:
+    min_k(Q_ik + K_jk) ≈ -τ·log(Σ_k exp(-Q_ik/τ)·exp(-K_jk/τ))
+    """
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    # LogSumExp identity: min_k(Q_ik + K_jk) ≈ -τ·log(Σ_k exp(-Q_ik·s/τ)·exp(-K_jk·s/τ))
+    # where s = scaling (head_dim**-0.5).  C_ij = Σ_k q_exp_ik * k_exp_kj routes through tensor cores.
+    q_exp = torch.exp(-query.float() * scaling / tau)
+    k_exp = torch.exp(-key_states.float() * scaling / tau)
+    C = torch.matmul(q_exp, k_exp.transpose(2, 3))          # (B, H, S_q, S_k)
+    scores = tau * torch.log(C.clamp(min=1e-30))             # tropical similarity (higher = attend more)
+
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        scores = scores + causal_mask                        # additive mask (-inf for future tokens)
+
+    attn_probs = nn.functional.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_output = torch.matmul(attn_probs, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_probs
+
+
 class Qwen3Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -190,16 +223,16 @@ class Qwen3Attention(nn.Module):
         self.is_causal = True
 
         self.q_proj = nn.Linear(
-            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size, config.num_attention_heads * self.head_dim, bias=getattr(config, "attention_bias", False)
         )
         self.k_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=getattr(config, "attention_bias", False)
         )
         self.v_proj = nn.Linear(
-            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=getattr(config, "attention_bias", False)
         )
         self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=getattr(config, "attention_bias", False)
         )
         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
@@ -237,7 +270,10 @@ class Qwen3Attention(nn.Module):
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
+        if self.config._attn_implementation == "tropical":
+            attention_interface = tropical_attention_forward
+            kwargs["tau"] = getattr(self.config, "tau", 0.1)
+        elif self.config._attn_implementation != "eager":
             if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
                 logger.warning_once(
                     "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
@@ -337,9 +373,17 @@ class Qwen3RotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
-
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        if self.rope_type not in ROPE_INIT_FUNCTIONS:
+            # 'default' or unknown: standard RoPE, extract rope_theta from rope_scaling if present
+            head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+            base = getattr(config, "rope_theta", 10000.0)
+            if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+                base = config.rope_scaling.get("rope_theta", base)
+            inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float() / head_dim))
+            self.attention_scaling = 1.0
+        else:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+            inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
@@ -387,6 +431,7 @@ class Qwen3PreTrainedModel(PreTrainedModel):
     _no_split_modules = ["Qwen3DecoderLayer"]
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn_2 = True
+    _supports_flash_attn = True
     _supports_sdpa = True
     _supports_flex_attn = True
     _supports_cache_class = True
@@ -773,8 +818,8 @@ class Qwen3Model(Qwen3PreTrainedModel):
 class KwargsForCausalLM(FlashAttentionKwargs): ...
 
 
-class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
+class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin, MultiBlockDecoderMixin):
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_rep"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
@@ -787,8 +832,14 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
-        
+
         self.teacher_model = None
+        # If set, repr_align cosine loss is computed only on these hidden-state
+        # indices (0 = embedding output, 1..N = transformer blocks). Used with
+        # the precomputed-anchor cache path so we don't need all 40 layers.
+        self.align_layers: Optional[list[int]] = None
+        self.repr_align_sub_sample_ratio: float = 1.0
+        self.repr_align_num_sample_layers: Optional[int] = None
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -866,7 +917,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        
+
         loss_components = {}
 
         if not get_parallel_state().sp_enabled and labels is not None:
@@ -887,17 +938,34 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                     )
                 )
                 labels[cu_seq_lens[1:-1] - 1] = IGNORE_INDEX
-        
+
         if mask_ratio is not None:
             is_causal = False
             mask_ratio = mask_ratio[..., 1:].contiguous()
-        
-        # Enable hidden states output for multi-layer alignment if teacher model is active
-        if (self.teacher_model is not None \
-            and repr_align_wt is not None \
-            and repr_align_wt > 0 \
-            and self.training):
-            output_hidden_states = True
+
+        # Hook-based selective hidden state capture for repr_align.
+        # output_hidden_states=True retains ALL N layer tensors as Python refs,
+        # which defeats gradient checkpointing — GC cannot free them.
+        # Forward hooks on only the align_layers indices let GC recompute the rest.
+        _repr_align_active = (
+            self.teacher_model is not None
+            and repr_align_wt is not None
+            and repr_align_wt > 0
+            and self.training
+        )
+        _captured_student: dict = {}
+        _student_hooks: list = []
+        if _repr_align_active:
+            if self.align_layers is not None:
+                for _idx in self.align_layers:
+                    def _make_hook(idx: int):
+                        def _hook(module, inp, out):
+                            _captured_student[idx] = out[0] if isinstance(out, tuple) else out
+                        return _hook
+                    # hidden_states[i] = output of layers[i-1] (index 0 is embedding)
+                    _student_hooks.append(self.model.layers[_idx - 1].register_forward_hook(_make_hook(_idx)))
+            else:
+                output_hidden_states = True  # fallback: align_layers not set
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs: BaseModelOutputWithPast = self.model(
@@ -913,9 +981,11 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             is_causal=is_causal,
             **kwargs,
         )
+        for _h in _student_hooks:
+            _h.remove()
 
         hidden_states = outputs[0]
-        
+
         # Compute multi-layer representation alignment loss
         repr_align_loss = None
         teacher_outputs = None
@@ -925,7 +995,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             and self.training \
             and labels is not None \
             and mask_ratio is not None):
-            
+
             # Get teacher model outputs with all hidden states
             with torch.no_grad():
                 teacher_outputs = self.teacher_model(
@@ -938,25 +1008,45 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                     is_causal=True,  # Teacher always uses causal attention
                     **kwargs,
                 )
-            
-            # Get all layer representations
-            student_hidden_states = outputs.hidden_states
+
+            # Student hidden states: prefer hook-captured (only align_layers retained),
+            # fall back to outputs.hidden_states if hooks weren't used.
+            if _captured_student:
+                student_hidden_states = tuple(_captured_student[i] for i in self.align_layers)
+            else:
+                student_hidden_states = outputs.hidden_states
+                if self.align_layers is not None:
+                    student_hidden_states = tuple(student_hidden_states[i] for i in self.align_layers)
             teacher_hidden_states = teacher_outputs.hidden_states
-            
+            if self.align_layers is not None:
+                teacher_hidden_states = tuple(teacher_hidden_states[i] for i in self.align_layers)
+
             loss_mask = (labels != IGNORE_INDEX)  # (L,)
             if loss_mask.any():
-                # h is shape [1, L, D], concatenate all layers in the first dimension and permute to [L, num_layers, D]
+                # h is shape [1, L, D], concatenate selected layers in the first dimension and permute to [L, num_layers, D]
                 student_stacked = torch.cat([h[..., :-1, :] for h in student_hidden_states], dim=0).permute(1, 0, 2)
                 student_stacked = student_stacked[loss_mask]
                 teacher_stacked = torch.cat([h[..., :-1, :] for h in teacher_hidden_states], dim=0).permute(1, 0, 2)
                 teacher_stacked = teacher_stacked[loss_mask]
-                
-                # Compute alignment loss
-                repr_align_loss = repr_align_loss_fn(
-                    student_stacked,  
-                    teacher_stacked,
-                )
-        
+
+                # Layer subsampling: randomly pick k of L layers each step
+                if self.repr_align_num_sample_layers is not None:
+                    num_layers = student_stacked.size(1)
+                    k = min(self.repr_align_num_sample_layers, num_layers)
+                    layer_idx = torch.randperm(num_layers, device=student_stacked.device)[:k]
+                    student_stacked = student_stacked[:, layer_idx, :]
+                    teacher_stacked = teacher_stacked[:, layer_idx, :]
+
+                # Token subsampling: randomly pick fraction of V tokens each step
+                if self.repr_align_sub_sample_ratio < 1.0:
+                    num_valid = student_stacked.size(0)
+                    num_sample = max(1, int(num_valid * self.repr_align_sub_sample_ratio))
+                    token_idx = torch.randperm(num_valid, device=student_stacked.device)[:num_sample]
+                    student_stacked = student_stacked[token_idx]
+                    teacher_stacked = teacher_stacked[token_idx]
+
+                repr_align_loss = repr_align_loss_fn(student_stacked, teacher_stacked)
+
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         hidden_states = hidden_states[:, slice_indices, :]
@@ -969,7 +1059,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             labels = labels.view(-1)  # flatten label
             if is_liger_kernel_available():
                 from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss  # type: ignore
-                
+
                 if mask_ratio is not None:
                     loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="none", ignore_index=IGNORE_INDEX)
                     if not get_parallel_state().sp_enabled:
@@ -998,7 +1088,14 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
                     loss = loss_fct(self.lm_head.weight, hidden_states, labels)
                     loss_components["ar"] = loss.detach()
             else:
-                raise ValueError("liger kernel is not available for training.")
+                import torch.nn.functional as F
+                # labels was already shifted to (S-1,) at line ~920; shift hidden_states to match
+                logits = self.lm_head(hidden_states[..., :-1, :].contiguous())
+                loss = F.cross_entropy(
+                    logits.view(-1, self.config.vocab_size),
+                    labels.view(-1),
+                    ignore_index=IGNORE_INDEX,
+                )
 
             if get_parallel_state().sp_enabled:
                 num_valid_tokens = (labels != IGNORE_INDEX).sum()
@@ -1006,7 +1103,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
 
         else:
             logits = self.lm_head(hidden_states)
-        
+
         # Add representation alignment loss
         if repr_align_loss is not None:
             loss = loss + repr_align_wt * repr_align_loss
@@ -1030,6 +1127,11 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, MDMGenerationMixin):
             result.loss_components = {k: v.detach().float().item() for k, v in loss_components.items()}
         else:
             result.loss_components = {}
+
+        # Expose repr_align hidden states for DifferentialReplayLoss in the training loop.
+        if _repr_align_active and teacher_outputs is not None:
+            result.repr_align_student_states = student_hidden_states
+            result.repr_align_teacher_states = teacher_hidden_states
 
         return result
 

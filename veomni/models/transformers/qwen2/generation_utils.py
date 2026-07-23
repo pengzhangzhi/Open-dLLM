@@ -1,16 +1,14 @@
 # veomni/models/transformers/qwen2/generation_utils.py
 
-import warnings
-import copy
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributions as dists
 from torch.nn import functional as F
-from transformers import __version__
 from transformers.generation.configuration_utils import GenerationConfig
-from transformers.utils import ModelOutput, is_torchdynamo_compiling, logging
+from transformers.utils import ModelOutput, logging
+
 
 logger = logging.get_logger(__name__)
 
@@ -60,7 +58,7 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, alg="origin")
         pass
     else:
         raise NotImplementedError(f"Algorithm {alg} not implemented.")
-    
+
     return confidence, x0
 
 
@@ -74,7 +72,7 @@ class MDMGenerationConfig(GenerationConfig):
         # Set do_sample=True as default for MDM (since MDM handles its own sampling)
         if 'do_sample' not in kwargs:
             kwargs['do_sample'] = True
-        
+
         super().__init__(**kwargs)
         self.temperature: float = kwargs.pop("temperature", 0.0)
         self.top_p: Optional[float] = kwargs.pop("top_p", None)
@@ -100,7 +98,7 @@ class MDMGenerationMixin:
     ) -> Tuple[torch.LongTensor, Dict[str, Any]]:
         if expand_size == 1:
             return input_ids, attention_mask
-        
+
         if input_ids is not None:
             input_ids = input_ids.repeat_interleave(expand_size, dim=0)
         if attention_mask is not None:
@@ -112,7 +110,7 @@ class MDMGenerationMixin:
     ) -> MDMGenerationConfig:
         if generation_config is None:
             generation_config = self.generation_config
-        
+
         # Use MDMGenerationConfig as the target class
         if not isinstance(generation_config, MDMGenerationConfig):
             generation_config = MDMGenerationConfig.from_dict(generation_config.to_dict())
@@ -128,7 +126,7 @@ class MDMGenerationMixin:
         generation_config: Optional[MDMGenerationConfig] = None,
         **kwargs,
     ) -> Union[MDMModelOutput, torch.LongTensor]:
-        
+
         # 1. Prepare generation config
         generation_config = self._mdm_prepare_generation_config(generation_config, **kwargs)
 
@@ -141,7 +139,7 @@ class MDMGenerationMixin:
 
         if generation_config.max_new_tokens is not None:
             generation_config.max_length = input_ids.shape[-1] + generation_config.max_new_tokens
-        
+
         # 3. Expand inputs for multi-sequence generation
         input_ids, attention_mask = self._expand_inputs_for_generation(
             expand_size=generation_config.num_return_sequences,
@@ -152,7 +150,7 @@ class MDMGenerationMixin:
         mask_token_id = generation_config.mask_token_id
         if mask_token_id is None:
             raise ValueError("`mask_token_id` must be set in the generation config.")
-        
+
         input_ids = F.pad(input_ids, (0, generation_config.max_length - input_ids.shape[1]), value=generation_config.mask_token_id)
         attention_mask = None
 
@@ -162,14 +160,14 @@ class MDMGenerationMixin:
             attention_mask=attention_mask,
             generation_config=generation_config
         )
-    
+
     def _mdm_sample(
         self,
         x: torch.LongTensor,
         attention_mask: Optional[torch.LongTensor],
         generation_config: MDMGenerationConfig
     ) -> Union[MDMModelOutput, torch.LongTensor]:
-        
+
         # Extract params from config
 
         # import pdb; pdb.set_trace()
@@ -274,31 +272,31 @@ class MDMGenerationMixin:
                 # For positions that started as mask and were not re-masked, unmask them with sampled tokens
                 keep_unmask = mask_index & (~to_mask)
                 x[keep_unmask] = x0_full[keep_unmask]
-                
+
 
 
             elif alg in ["maskgit_plus", "entropy", "topk_margin"]:
                 # Confidence-based sampling (maskgit, entropy, etc.)
-                
+
                 confidence, x0 = sample_tokens(mask_logits, temperature=temperature, top_p=top_p, top_k=top_k, alg=alg)
                 confidence = confidence.to(mask_logits.dtype)
 
                 # Calculate number of mask tokens per sample
                 num_mask_tokens_per_sample = mask_index.sum(dim=1)  # [batch_size]
-                
+
                 # Calculate transfer tokens per sample
                 if i < steps - 1:
                     number_transfer_tokens_per_sample = (num_mask_tokens_per_sample.float() * (1 - s / t)).long()
                 else:
                     number_transfer_tokens_per_sample = num_mask_tokens_per_sample
-                
+
                 # Build full confidence matrix
                 full_confidence = torch.full_like(x, -torch.inf, device=self.device, dtype=logits.dtype)
                 full_confidence[mask_index] = confidence
-                
+
                 # Get maximum transfer tokens for efficient batching
                 max_transfer_tokens = number_transfer_tokens_per_sample.max().item()
-                
+
                 if max_transfer_tokens > 0:
                     if alg_temp is None or alg_temp == 0:
                         # Use topk for each sample
@@ -313,22 +311,22 @@ class MDMGenerationMixin:
                         gumbel_noise = -torch.log(-torch.log(uniform))
                         scores = scaled_logits + gumbel_noise
                         _, all_transfer_indices = torch.topk(scores, max_transfer_tokens, dim=1)  # [batch_size, max_transfer_tokens]
-                    
+
                     # Create mask for valid transfers (handle variable number of transfers per sample)
                     batch_size = x.size(0)
                     valid_mask = torch.arange(max_transfer_tokens, device=x.device).unsqueeze(0) < number_transfer_tokens_per_sample.unsqueeze(1)  # [batch_size, max_transfer_tokens]
-                    
+
                     # Get valid transfer indices and corresponding batch indices
                     valid_transfer_indices = all_transfer_indices[valid_mask]  # [total_valid_transfers]
                     valid_batch_indices = torch.arange(batch_size, device=x.device).unsqueeze(1).expand_as(all_transfer_indices)[valid_mask]  # [total_valid_transfers]
-                    
+
                     # Prepare the transfer data
                     x_ = torch.zeros_like(x, device=self.device, dtype=torch.long) + mask_token_id
                     x_[mask_index] = x0.clone()
-                    
+
                     # Batch update using advanced indexing
                     x[valid_batch_indices, valid_transfer_indices] = x_[valid_batch_indices, valid_transfer_indices]
-            
+
             else:
                 raise NotImplementedError(f"Algorithm {alg} not implemented.")
 
@@ -339,3 +337,83 @@ class MDMGenerationMixin:
             return MDMModelOutput(sequences=x, history=histories)
         else:
             return x
+
+
+@torch.no_grad()
+def mdm_generate(
+    model: torch.nn.Module,
+    input_ids: torch.LongTensor,
+    mask_token_id: int,
+    max_new_tokens: int = 32,
+    steps: int = 16,
+    temperature: float = 0.7,
+    top_k: int = 200,
+    alg: str = "entropy",
+    alg_temp: float = 0.6,
+) -> str:
+    """Standalone masked diffusion generation that works with any model (no mixin needed).
+
+    Handles PEFT-wrapped models by calling model(input_ids=x, is_causal=False) directly.
+    """
+    device = input_ids.device
+    pad_token_id = getattr(model.config, "pad_token_id", None)
+    x = F.pad(input_ids, (0, max_new_tokens), value=mask_token_id)
+    gen_attention_mask = (x != pad_token_id).long() if pad_token_id is not None else None
+    timesteps = torch.linspace(1, 1e-3, steps + 1, device=device)
+
+    for i in range(steps):
+        mask_index = (x == mask_token_id)
+        if not mask_index.any():
+            break
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            outputs = model(input_ids=x, attention_mask=gen_attention_mask, is_causal=False)
+        logits = outputs.logits
+        logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
+        mask_logits = logits[mask_index]
+        t, s = timesteps[i], timesteps[i + 1]
+
+        probs = torch.softmax(mask_logits.float(), dim=-1)
+        if temperature > 0:
+            mask_logits = mask_logits / temperature
+            probs = torch.softmax(mask_logits.float(), dim=-1)
+
+        if top_k and top_k > 0:
+            top_k_val = min(top_k, probs.size(-1))
+            indices_to_remove = probs < torch.topk(probs, top_k_val)[0][..., -1, None]
+            probs = probs.masked_fill(indices_to_remove, 0.0)
+            probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+
+        if alg == "entropy":
+            log_probs = torch.log(probs.clamp(min=1e-10))
+            confidence = (probs * log_probs).sum(dim=-1)
+        else:
+            confidence = torch.gather(probs, -1, probs.argmax(dim=-1, keepdim=True)).squeeze(-1)
+
+        x0 = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(confidence.shape) if temperature > 0 else probs.argmax(dim=-1)
+
+        num_masked = mask_index.sum(dim=-1, keepdim=True)
+        gamma = 1 - s / t
+        num_to_unmask = (num_masked * gamma).long()
+
+        full_confidence = torch.full_like(x, -float("inf"), device=device, dtype=confidence.dtype)
+        full_confidence[mask_index] = confidence
+
+        if alg_temp and alg_temp > 0:
+            scaled_logits = full_confidence / alg_temp
+            uniform = torch.rand_like(scaled_logits).clamp_(min=1e-20, max=1 - 1e-20)
+            gumbel_noise = -torch.log(-torch.log(uniform))
+            scores = scaled_logits + gumbel_noise
+            _, unmask_indices = torch.topk(scores, num_to_unmask.max(), dim=1)
+        else:
+            _, unmask_indices = torch.topk(full_confidence, num_to_unmask.max(), dim=1)
+
+        rows = torch.arange(x.size(0), device=device).unsqueeze(1)
+        unmask_selection_mask = torch.zeros_like(x, dtype=torch.bool)
+        unmask_selection_mask[rows, unmask_indices] = True
+        unmask_selection_mask = unmask_selection_mask & (torch.cumsum(unmask_selection_mask.long(), dim=-1) <= num_to_unmask)
+
+        x_unmasked_proposals = torch.full_like(x, fill_value=mask_token_id)
+        x_unmasked_proposals[mask_index] = x0
+        x[unmask_selection_mask] = x_unmasked_proposals[unmask_selection_mask]
+
+    return x

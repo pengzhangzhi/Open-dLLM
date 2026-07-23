@@ -48,6 +48,32 @@ _OPTIMIZER_DIR = "optimizer"
 _EXTRA_STATE_DIR = "extra_state"
 
 
+def _dequantize_for_save(sd: Dict[str, Any]) -> None:
+    """In-place: replace torchao quantized tensors in a state dict with bf16.
+
+    DCP's gather_object pickles each rank's planner metadata, and
+    AffineQuantizedTensor's metadata contains code objects pickle rejects.
+    Materializing quantized weights to bf16 only for the save side-steps that
+    without touching the live model — in-memory weights stay quantized so VRAM
+    savings are preserved. Loading back into a quantized model is not
+    supported; re-run quantize_(model, ...) after a plain bf16 load to recover
+    the quantized state.
+    """
+    for k, v in list(sd.items()):
+        if isinstance(v, dict):
+            _dequantize_for_save(v)
+            continue
+        # Detect torchao quantized tensors by class name. They all expose
+        # .dequantize() returning a plain tensor. Plain torch.Tensor /
+        # nn.Parameter also have a (no-op) .dequantize, so filter by class.
+        cls_name = type(v).__name__
+        if "Quantized" in cls_name and callable(getattr(v, "dequantize", None)):
+            try:
+                sd[k] = v.dequantize().to(torch.bfloat16)
+            except Exception as e:
+                logger.warning(f"dequantize-on-save failed for key {k} (type={cls_name}): {e}")
+
+
 class ModelState(Stateful):
     """
     A wrapper around a model to make it stateful.
@@ -60,6 +86,7 @@ class ModelState(Stateful):
 
     def state_dict(self):
         model_state_dict = get_model_state_dict(model=self.model)
+        _dequantize_for_save(model_state_dict)
         return {"model": model_state_dict}
 
     def load_state_dict(self, state_dict):
@@ -110,7 +137,9 @@ def build_checkpointer(
         Checkpointer: checkpointer with given mode.
     """
 
-    if ckpt_manager == "bytecheckpoint":
+    if dist_backend == "deepspeed":
+        from .ds_checkpointer import DeepSpeedCheckpointer as Checkpointer
+    elif ckpt_manager == "bytecheckpoint":
         if dist_backend == "ddp":
             from bytecheckpoint import DDPCheckpointer as Checkpointer
         elif dist_backend == "fsdp1":
@@ -122,7 +151,7 @@ def build_checkpointer(
     elif ckpt_manager == "dcp":
         if not is_torch_version_greater_than("2.4"):
             raise ValueError("DCP checkpoint manager requires torch version >= 2.4")
-        if dist_backend not in ["ddp", "fsdp1", "fsdp2"]:
+        if dist_backend not in ["ddp", "deepspeed", "fsdp1", "fsdp2"]:
             raise ValueError(
                 f"Unsupported distributed backend: {dist_backend} for DCP checkpoint manager, supported modes are: ddp, fsdp1, fsdp2"
             )

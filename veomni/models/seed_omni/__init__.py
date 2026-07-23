@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from transformers import AutoConfig, AutoModelForVision2Seq, AutoProcessor
+from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
 
 from .auto import SeedOmniConfig, SeedOmniModel, SeedOmniProcessor, build_omni_model, build_omni_processor
 from .decoder import movqgan
@@ -22,7 +22,7 @@ from .foundation import qwen2_vl_foundation
 
 
 AutoConfig.register("seed_omni", SeedOmniConfig)
-AutoModelForVision2Seq.register(SeedOmniConfig, SeedOmniModel)
+AutoModelForImageTextToText.register(SeedOmniConfig, SeedOmniModel)
 AutoProcessor.register(SeedOmniConfig, SeedOmniProcessor)
 
 

@@ -1,0 +1,82 @@
+# NVFP4 QAT + PersistentSparseAdam smoke test — Qwen3-1.7B, 5 steps
+#
+# Combines two VRAM-saving techniques:
+#   1. NVFP4 QAT — stores weights in 4-bit floating point during training
+#      (4× reduction on model weight memory)
+#   2. PersistentSparseAdam — keeps only 25% of optimizer states on GPU
+#      (4× reduction on optimizer state memory)
+#
+# Requires: torch nightly + torchao nightly (CUDA 13.0, Blackwell)
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0 .venv/bin/torchrun --nproc_per_node=1 \
+#       tasks/train_torch.py configs/pretrain/smoke_nvfp4_qat.yaml
+
+model:
+  model_path: Qwen/Qwen3-1.7B
+  attn_implementation: sdpa
+  enable_nvfp4_qat: true          # Replace nn.Linear with NVFP4FakeQuantizedLinear
+
+data:
+  train_path: /tmp/smoke_20.jsonl
+  train_size: 20
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/nvfp4-qat-smoke
+  ulysses_parallel_size: 1
+  global_batch_size: 2
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: false
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align — all 28 layers in pool
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3-1.7b-all28-smoke20
+  align_layers: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28"
+  repr_align_num_sample_layers: 4
+  repr_align_sub_sample_ratio: 0.25
+
+  # PersistentSparseAdam — 25% optimizer state subset
+  optimizer: persistent_sparse_adam
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  # DDP — no DeepSpeed overhead
+  data_parallel_mode: ddp
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_hf_weights: false
+  auto_resume: false
+  save_time_interval_minutes: 0
+
+  use_wandb: false
+
+  max_steps: 5

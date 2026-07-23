@@ -16,15 +16,16 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/model_loader/loader.py
 
 from abc import ABC
+from typing import Optional
 
 import torch
 from transformers import (
     AutoModelForCausalLM,
-    AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
     PreTrainedModel,
 )
-from transformers.modeling_utils import no_init_weights
 
+from ..distributed.parallel_state import get_parallel_state
 from ..utils import logging
 from ..utils.import_utils import is_torch_npu_available, is_vescale_available
 from .module_utils import init_empty_weights, load_model_weights
@@ -48,8 +49,8 @@ class HuggingfaceLoader(BaseModelLoader):
 
     def load_model(self, init_kwargs: dict, **kwargs):
         model_config = init_kwargs["config"]
-        if type(model_config) in AutoModelForVision2Seq._model_mapping.keys():  # assume built-in models
-            load_class = AutoModelForVision2Seq
+        if type(model_config) in AutoModelForImageTextToText._model_mapping.keys():  # assume built-in models
+            load_class = AutoModelForImageTextToText
         else:
             load_class = AutoModelForCausalLM
 
@@ -76,7 +77,7 @@ class HuggingfaceLoader(BaseModelLoader):
                 with meta_device_init():
                     model = self.model_cls._from_config(**init_kwargs)
             else:
-                with init_empty_weights(), no_init_weights():
+                with init_empty_weights():
                     model = load_class.from_config(**init_kwargs)
             if not empty_init:
                 load_model_weights(model, weights_path, init_device)
@@ -116,13 +117,21 @@ class CustomizedModelingLoader(BaseModelLoader):
             with torch.device(init_device):
                 model = self.model_cls._from_config(**init_kwargs)
         else:
-            if is_vescale_available() and init_device == "meta":
+            _in_zero_init = (
+                get_parallel_state().dp_mode == "deepspeed"
+                and init_device in ("meta", "cpu")
+            )
+            if _in_zero_init:
+                # DeepSpeed zero.Init() handles parameter partitioning
+                # incrementally — no init_empty_weights needed.
+                model = self.model_cls._from_config(**init_kwargs)
+            elif is_vescale_available() and init_device == "meta":
                 from vescale.initialize.meta_init import meta_device_init
 
                 with meta_device_init():
                     model = self.model_cls._from_config(**init_kwargs)
             else:
-                with init_empty_weights(), no_init_weights():
+                with init_empty_weights():
                     model = self.model_cls._from_config(**init_kwargs)
             if not empty_init:
                 load_model_weights(model, weights_path, init_device)
@@ -134,13 +143,64 @@ class CustomizedModelingLoader(BaseModelLoader):
             output_embeddings = model.get_output_embeddings()
             output_embeddings._parameters["weight"] = input_embeddings._parameters["weight"]
         if kwargs.get("make_teacher", False):
-            print("make_teacher")
-            import copy
-            teacher_model = copy.deepcopy(model)
-            teacher_model.eval()
-            for param in teacher_model.parameters():
-                param.requires_grad = False
-            model.teacher_model = teacher_model
+            # Parse align_layers CSV → list[int]; attach to student so the
+            # repr_align loss subsets to those indices.
+            align_layers_str = kwargs.get("align_layers")
+            align_layers: Optional[list] = None
+            if align_layers_str:
+                align_layers = sorted({int(x) for x in align_layers_str.split(",") if x.strip()})
+                if hasattr(model, "align_layers"):
+                    model.align_layers = align_layers
+                else:
+                    setattr(model, "align_layers", align_layers)
+
+            # Sub-sample ratio for repr_align token loss
+            sub_sample_ratio = kwargs.get("repr_align_sub_sample_ratio")
+            if sub_sample_ratio is not None:
+                sub_sample_ratio = float(sub_sample_ratio)
+                if hasattr(model, "repr_align_sub_sample_ratio"):
+                    model.repr_align_sub_sample_ratio = sub_sample_ratio
+                else:
+                    setattr(model, "repr_align_sub_sample_ratio", sub_sample_ratio)
+
+            # Number of layers to randomly sample per step for repr_align loss
+            num_sample_layers = kwargs.get("repr_align_num_sample_layers")
+            if num_sample_layers is not None:
+                num_sample_layers = int(num_sample_layers)
+                if hasattr(model, "repr_align_num_sample_layers"):
+                    model.repr_align_num_sample_layers = num_sample_layers
+                else:
+                    setattr(model, "repr_align_num_sample_layers", num_sample_layers)
+
+            anchor_cache_dir = kwargs.get("anchor_cache_dir")
+            if anchor_cache_dir:
+                # Precomputed-anchor path: skip the deepcopy entirely, save
+                # ~70 GB for a 35B teacher. Cache contract is verified by
+                # CachedTeacher against the student's config.
+                from .cached_teacher import CachedTeacher
+                if align_layers is None:
+                    raise ValueError(
+                        "train.align_layers must be set when train.anchor_cache_dir is set "
+                        "(the cache only stores a subset of layers, not all of them)."
+                    )
+                print(f"[loader] using CachedTeacher from {anchor_cache_dir} (layers={align_layers})")
+                cfg = model.config
+                model.teacher_model = CachedTeacher(
+                    cache_dir=anchor_cache_dir,
+                    num_hidden_layers=cfg.num_hidden_layers,
+                    hidden_size=cfg.hidden_size,
+                )
+            else:
+                print("make_teacher (live deepcopy)")
+                import copy
+                teacher_model = copy.deepcopy(model)
+                # PATCH: Move teacher to the second GPU (RTX 4000)
+                if torch.cuda.device_count() > 1:
+                    teacher_model = teacher_model.to("cuda:1")
+                teacher_model.eval()
+                for param in teacher_model.parameters():
+                    param.requires_grad = False
+                model.teacher_model = teacher_model
         return model
 
 

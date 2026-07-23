@@ -51,6 +51,7 @@ _PACKAGE_FLAGS: Dict[str, bool] = {
     "soundfile": _is_package_available("soundfile"),
     "triton": _is_package_available("triton"),
     "veomni_patch": _is_package_available("veomni_patch"),
+    "fla": _is_package_available("fla"),
 }
 
 
@@ -104,3 +105,7 @@ def is_transformers_version_greater_or_equal_to(value: str) -> bool:
 
 def is_veomni_patch_available() -> bool:
     return _PACKAGE_FLAGS["veomni_patch"]
+
+
+def is_fla_available() -> bool:
+    return _PACKAGE_FLAGS["fla"]

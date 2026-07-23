@@ -4,14 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "open-dcoder"
-dynamic = ["dependencies", "optional-dependencies"]
 version = "0.1.0"
 authors = [
   { name="Fred Z. Peng", email="zp70@duke.edu" },
 ]
 description = "Open-dCoder: Open Diffusion Large Language Model for Code Generation"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = ["diffusion", "language model", "code generation", "machine learning", "pytorch"]
@@ -20,21 +19,59 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Code Generators",
 ]
 
-[project.urls]
-Homepage = "https://github.com/pengzhangzhi/dLLM-training"
-Issues = "https://github.com/pengzhangzhi/dLLM-training/issues"
-Repository = "https://github.com/pengzhangzhi/dLLM-training"
+dependencies = [
+    "torch>=2.6.0",
+    "transformers>=4.57.6",
+    "accelerate",
+    "datasets",
+    "sentencepiece",
+    "tiktoken>=0.9.0",
+    "wandb",
+    "tqdm",
+    "pyyaml",
+    "safetensors",
+    "ninja",
+    "einops",
+    "packaging",
+    "blobfile>=3.0.0",
+    "diffusers>=0.30.0,<=0.31.0",
+    "peft",
+    "hf-transfer",
+    "codetiming",
+    "hydra-core",
+    "pandas",
+    "pyarrow>=15.0.0",
+    "pylatexenc",
+    "torchdata>=0.8.0,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit",
+    "ruff",
+    "pytest",
+]
+deepspeed = [
+    "deepspeed>=0.15.0",
+]
+vision = [
+    "torchvision",
+]
+blackwell = [
+    # NVFP4 QAT — requires torch + torchao nightly with CUDA 13.0
+    # Install with: pip install --pre torch torchao mslk --index-url https://download.pytorch.org/whl/nightly/cu130
+    "torch>=2.12.0.dev",
+    "torchao>=0.17.0.dev",
+    "mslk>=2026.3.0",
+]
 
 [tool.ruff]
-target-version = "py38"
+target-version = "py311"
 line-length = 119
 indent-width = 4
 
@@ -55,3 +92,19 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+
+[tool.uv]
+# Pin torch to CUDA 12.9 for Blackwell (RTX 5090) compatibility
+constraint-dependencies = [
+    "torch>=2.6.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-nightly-cu130"
+url = "https://download.pytorch.org/whl/nightly/cu130"
+explicit = true

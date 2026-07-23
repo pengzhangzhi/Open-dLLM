@@ -1,0 +1,90 @@
+# Repr-Align smoke with torchao quantize_frozen ENABLED.
+#
+# Variant of qwen3_1_7b_repr_align_smoke.yaml that freezes layers 14..27 and
+# quantizes those (and lm_head, embed, norm) to int8 weight-only via torchao.
+# Purpose: verify the quantize_frozen plumbing on the proven Qwen3-1.7B path
+# before committing to a 27B run. Trainable layers (0..13) stay in bf16.
+#
+# Repr-Align signal is preserved because layer 0..13 are still trainable, so
+# the student's hidden states at align_layers (7,14,21,28) still diverge from
+# the teacher and the cosine loss has gradient.
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#       torchrun --nproc_per_node=1 \
+#       tasks/train_torch.py configs/pretrain/qwen3_1_7b_repr_align_quant_smoke.yaml
+
+model:
+  model_path: Qwen/Qwen3-1.7B
+  attn_implementation: sdpa
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl
+  train_size: 1000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qwen3-1.7b-repr-align-quant-smoke
+  data_parallel_mode: ddp
+  ulysses_parallel_size: 1
+  global_batch_size: 8
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align core
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3-1.7b
+  align_layers: "7,14,21,28"
+
+  # Freeze second half of the stack + lm_head/embed/norm so quantize_frozen has
+  # work to do. Trainable: model.layers.0..13.
+  freeze_layers: "embed_tokens,lm_head,model.norm,model.layers.14.,model.layers.15.,model.layers.16.,model.layers.17.,model.layers.18.,model.layers.19.,model.layers.20.,model.layers.21.,model.layers.22.,model.layers.23.,model.layers.24.,model.layers.25.,model.layers.26.,model.layers.27."
+
+  # torchao weight-only int8 on every fully-frozen Linear.
+  quantize_frozen: true
+  quantize_frozen_dtype: int8
+
+  optimizer: anyprecision_adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: true
+  init_device: cuda
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_epochs: 1               # relies on _dequantize_for_save in checkpointer.py
+  save_hf_weights: false
+  auto_resume: true
+  save_time_interval_minutes: 60
+  # Escape hatch: if a future torchao release breaks the dequantize-on-save
+  # path, set save_steps/save_epochs/save_time_interval_minutes all to 0 to
+  # skip DCP entirely and keep this smoke usable.
+
+  use_wandb: true
+  wandb_project: open-dllm-smoke
+  wandb_name: qwen3-1.7b-repr-align-quant-smoke

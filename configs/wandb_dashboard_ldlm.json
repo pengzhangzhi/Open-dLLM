@@ -1,0 +1,89 @@
+# Wandb Dashboard Template for LDLM Training
+#
+# Import this into your wandb project:
+# 1. Go to your project dashboard
+# 2. Click "Add Panel" -> "Import from JSON"
+# 3. Paste the relevant section or configure manually
+#
+# These panels give you exactly the insights from LDLM paper Figures 1-3.
+
+{
+  "version": 1,
+  "panels": [
+    {
+      "name": "Core Losses",
+      "type": "line-chart",
+      "metrics": [
+        "train/total_loss",
+        "train/diffusion_loss",
+        "train/recon_h_loss",
+        "train/recon_w_loss"
+      ],
+      "x_axis": "step",
+      "title": "Loss Breakdown (LDLM Figure 1)"
+    },
+    {
+      "name": "Latent Space Health",
+      "type": "line-chart",
+      "metrics": [
+        "train/latent_norm",
+        "train/latent_std"
+      ],
+      "x_axis": "step",
+      "title": "Latent Space Quality (critical for collapse detection)"
+    },
+    {
+      "name": "Sampler Diagnostics",
+      "type": "line-chart",
+      "metrics": [
+        "train/sampler_loss_min",
+        "train/sampler_loss_max",
+        "train/sampler_loss_range"
+      ],
+      "x_axis": "step",
+      "title": "Adaptive Sampler Health (Section 5.3)"
+    },
+    {
+      "name": "Training Signals",
+      "type": "line-chart",
+      "metrics": [
+        "training/lr",
+        "training/grad_norm",
+        "training/diff_weight"
+      ],
+      "x_axis": "step",
+      "title": "Learning Rate + Grad Norm + Warmup"
+    },
+    {
+      "name": "Generation Quality",
+      "type": "line-chart",
+      "metrics": [
+        "train/gen_ppl",
+        "train/entropy"
+      ],
+      "x_axis": "step",
+      "title": "Diversity vs Quality (LDLM Figure 1)"
+    },
+    {
+      "name": "Latent Distribution (Mean)",
+      "type": "histogram",
+      "metric": "latent_stats/z0_mean",
+      "title": "Latent Mean Distribution"
+    },
+    {
+      "name": "Latent Distribution (Std)",
+      "type": "histogram",
+      "metric": "latent_stats/z0_std",
+      "title": "Latent Std Distribution"
+    },
+    {
+      "name": "Decoder Noise",
+      "type": "line-chart",
+      "metrics": [
+        "train/decoder_noise_std"
+      ],
+      "x_axis": "step",
+      "title": "Decoder Input Noise Std"
+    }
+  ]
+}

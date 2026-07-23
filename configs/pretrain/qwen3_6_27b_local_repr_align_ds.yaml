@@ -1,0 +1,93 @@
+# Local Repr-Align on Qwen3.6-27B — DeepSpeed ZeRO-3 + CPU offload.
+# Optimized for RTX 5090 (32GB) + RTX PRO 4000 Blackwell (24GB).
+#
+# Uses CachedTeacher at /home/johndpope/ds_offload/anchors/qwen3.6-27b/
+# covering ~1,000 examples from the full data.jsonl.
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=0,1 DS_SKIP_CUDA_CHECK=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#       .venv/bin/torchrun --nproc_per_node=2 \
+#       tasks/train_torch.py configs/pretrain/qwen3_6_27b_local_repr_align_ds.yaml
+
+model:
+  model_path: /home/johndpope/ds_offload/models/Qwen3.6-27B
+  attn_implementation: sdpa
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data.jsonl
+  train_size: 1000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 4
+  prefetch_factor: 4
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qwen3.6-27b-local-repr-align
+  data_parallel_mode: deepspeed
+  ds_zero_stage: 3
+  init_device: meta
+  ds_offload_optimizer: cpu
+  ds_offload_param: cpu
+  ds_overlap_comm: true
+  ds_contiguous_gradients: true
+  ds_nvme_path: /home/johndpope/ds_offload
+
+  ulysses_parallel_size: 1
+  expert_parallel_size: 1
+  global_batch_size: 2
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align core
+  enable_masking: true
+  repr_align_wt: 1.0
+  repr_align_sub_sample_ratio: 0.25
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-27b
+  align_layers: "16,32,48,64"
+
+  # Full layers — nothing frozen
+  freeze_layers: ""
+  quantize_frozen: false
+
+  # Smoke test — increase for real training
+  max_steps: 10
+
+  optimizer: adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: false
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  enable_full_determinism: false
+  empty_cache_steps: 5
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_total_limit: 2
+  save_hf_weights: true
+  save_epochs: 0
+  auto_resume: true
+  save_time_interval_minutes: 0
+
+  use_wandb: true
+  wandb_project: open-dllm-27b-local
+  wandb_name: qwen3.6-27b-local-repr-align-ds
+
+

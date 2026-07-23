@@ -67,7 +67,10 @@ class MappingDataset(Dataset):
 
     def __getitem__(self, index: int) -> List[Dict[str, "torch.Tensor"]]:
         if self._transform is not None:
-            return self._transform(self._data[index])
+            try:
+                return self._transform(self._data[index], index=index)
+            except TypeError:
+                return self._transform(self._data[index])
         else:
             return self._data[index]
 
@@ -125,7 +128,7 @@ def build_mapping_dataset(
         if os.path.isdir(data_path):
             data_files.extend([os.path.join(data_path, fn) for fn in os.listdir(data_path)])
         elif os.path.isfile(data_path):
-            data_files.append(data_files)
+            data_files.append(data_path)
         else:
             raise FileNotFoundError(f"Dataset {data_path} not exists.")
 
@@ -163,7 +166,7 @@ def build_iterative_dataset(
         if os.path.isdir(data_path):
             data_files.extend([os.path.join(data_path, fn) for fn in os.listdir(data_path)])
         elif os.path.isfile(data_path):
-            data_files.append(data_files)
+            data_files.append(data_path)
         else:
             raise FileNotFoundError(f"Dataset {data_path} not exists.")
 

@@ -1,0 +1,110 @@
+# Repr-Align on Qwen3.6-35B-A3B (MoE, 256 experts × 8 active) with ONLY layer
+# 0 trainable, sharded across the MSI's two GPUs.
+#
+# Memory budget: 35B params × 2 bytes = ~70 GB bf16 weights. Sharded across
+# 2 GPUs that's ~35 GB/card — overflows the 24 GB RTX PRO 4000. FSDP CPU
+# offload is mandatory here; it streams sharded params from CPU per forward.
+# Expect ~30-60s/step.
+#
+# Why layer 0: same reason as the dense 27B config — train a layer upstream of
+# all align_layers so repr_align gradient actually flows into the trainable
+# block. With MoE the "one layer" includes the layer-0 router and all 256 of
+# its experts (substring match on "model.layers.0." captures every expert
+# parameter at that depth).
+#
+# Prerequisites:
+#   1. Pre-cache anchors (needs CPU offload — 70 GB doesn't fit on 56 GB VRAM):
+#      python scripts/precompute_anchor.py \
+#          --model_path Qwen/Qwen3.6-35B-A3B \
+#          --data_path /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl \
+#          --output_dir /home/johndpope/ds_offload/anchors/qwen3.6-35b-a3b \
+#          --layers 10,20,30,40 \
+#          --max_seq_len 2048 \
+#          --max_examples 1000 \
+#          --device_map auto
+#      Note: device_map="auto" will spill to CPU; precompute will be slow
+#      (~minutes/example). Expect ~32 GB cache (hidden_size=2048).
+#
+#   2. Launch with TWO GPUs:
+#      CUDA_VISIBLE_DEVICES=0,1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#          torchrun --nproc_per_node=2 \
+#          tasks/train_torch.py configs/pretrain/qwen3_6_35b_a3b_one_layer_repr_align.yaml
+
+model:
+  # Absolute path to the HF cache snapshot. parallel_load_safetensors (the
+  # FSDP+meta-init weight loader) expects a directory containing
+  # model.safetensors.index.json + shards, not a HF model id.
+  model_path: /home/johndpope/.cache/huggingface/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/995ad96eacd98c81ed38be0c5b274b04031597b0/
+  attn_implementation: eager        # qwen3_5 disables sdpa; flash-attn pkg not installed
+
+data:
+  train_path: /run/media/johndpope/12TB/open_dllm/ldlm_data/data_smoke_1000.jsonl
+  train_size: 1000
+  dataloader_type: native
+  data_type: plaintext
+  max_seq_len: 2048             # must match precompute_anchor.py --max_seq_len
+  text_keys: text
+  drop_last: true
+  datasets_type: mapping
+  num_workers: 2
+  prefetch_factor: 2
+
+train:
+  output_dir: /home/johndpope/ds_offload/checkpoints/qwen3.6-35b-a3b-one-layer-repr-align
+  data_parallel_mode: fsdp1
+  ulysses_parallel_size: 1
+  expert_parallel_size: 1       # one trainable layer; EP=1 keeps it simple
+  global_batch_size: 2          # 1 micro-bsz × 2 GPUs
+  micro_batch_size: 1
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.0
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 50
+
+  # Repr-Align core
+  enable_masking: true
+  repr_align_wt: 1.0
+  anchor_cache_dir: /home/johndpope/ds_offload/anchors/qwen3.6-35b-a3b
+  align_layers: "10,20,30,40"   # spread across 40 blocks; all downstream of trainable layer 0
+
+  # One-layer training: freeze everything except model.layers.0.* (including
+  # all 256 experts at depth 0). Same substring-match scheme as the 27B config.
+  freeze_layers: "embed_tokens,lm_head,model.norm,model.layers.1.,model.layers.2.,model.layers.3.,model.layers.4.,model.layers.5.,model.layers.6.,model.layers.7.,model.layers.8.,model.layers.9.,model.layers.10.,model.layers.11.,model.layers.12.,model.layers.13.,model.layers.14.,model.layers.15.,model.layers.16.,model.layers.17.,model.layers.18.,model.layers.19.,model.layers.20.,model.layers.21.,model.layers.22.,model.layers.23.,model.layers.24.,model.layers.25.,model.layers.26.,model.layers.27.,model.layers.28.,model.layers.29.,model.layers.30.,model.layers.31.,model.layers.32.,model.layers.33.,model.layers.34.,model.layers.35.,model.layers.36.,model.layers.37.,model.layers.38.,model.layers.39."
+
+  # Optional: torchao weight-only quantization of frozen Linear modules.
+  # 35B-A3B bf16 weights ~= 70 GB; int8 brings that to ~35 GB and lets you
+  # turn enable_fsdp_offload back to false (2 GPUs × ~17.5 GB sharded weights
+  # fits within the 24 GB RTX PRO 4000). Needs `pip install torchao`.
+  # Trainable layer 0 (incl. its 256 experts) stays in bf16.
+  quantize_frozen: false          # set true to enable
+  quantize_frozen_dtype: int8     # int8 (~/2) or int4 (~/4)
+
+  optimizer: anyprecision_adamw
+  lr: 1.0e-4
+  lr_warmup_ratio: 0.01
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  lr_min: 1.0e-6
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  enable_full_shard: true         # FSDP1 across both GPUs
+  enable_fsdp_offload: true       # mandatory: 70 GB > 56 GB VRAM
+  enable_activation_offload: false
+  init_device: meta               # lazy-init to avoid 70 GB allocation spike
+  enable_full_determinism: false
+  empty_cache_steps: 50
+
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 100
+  save_hf_weights: false
+  auto_resume: true
+  save_time_interval_minutes: 60
+
+  use_wandb: true
+  wandb_project: open-dllm-smoke
+  wandb_name: qwen3.6-35b-a3b-one-layer-repr-align
